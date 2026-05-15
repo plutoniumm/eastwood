@@ -20,7 +20,7 @@ func (Analyzer) Language() string     { return "latex" }
 func (Analyzer) Extensions() []string { return []string{".tex", ".cls", ".sty", ".bib"} }
 
 // Parse returns nil for v1; tree-sitter-latex is not yet integrated.
-func (Analyzer) Parse(src []byte) (*sitter.Tree, error) { return nil, nil }
+func (Analyzer) Parse(_ []byte, _ string) (*sitter.Tree, error) { return nil, nil }
 
 // CommentRanges scans for LaTeX comments (% to EOL, respecting \%).
 func (Analyzer) CommentRanges(src []byte, _ *sitter.Tree) []core.ByteRange {

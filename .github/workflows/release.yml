@@ -1,0 +1,90 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: build darwin/arm64
+        run: |
+          CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
+            go build -trimpath -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
+            -o eastwood ./cmd/eastwood
+          tar czf eastwood_darwin_arm64.tar.gz eastwood
+
+      - name: build darwin/amd64
+        # macOS clang supports -arch x86_64 on Apple Silicon runners
+        run: |
+          CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 \
+            go build -trimpath -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
+            -o eastwood ./cmd/eastwood
+          tar czf eastwood_darwin_amd64.tar.gz eastwood
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin
+          path: eastwood_darwin_*.tar.gz
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: install arm64 cross-compiler
+        run: sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: build linux/amd64
+        run: |
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
+            -o eastwood ./cmd/eastwood
+          tar czf eastwood_linux_amd64.tar.gz eastwood
+
+      - name: build linux/arm64
+        run: |
+          CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
+            go build -trimpath -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
+            -o eastwood ./cmd/eastwood
+          tar czf eastwood_linux_arm64.tar.gz eastwood
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: eastwood_linux_*.tar.gz
+
+  release:
+    needs: [build-macos, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: checksums
+        run: sha256sum *.tar.gz > checksums.txt
+
+      - name: publish release
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            *.tar.gz checksums.txt
+        env:
+          GH_TOKEN: ${{ github.token }}

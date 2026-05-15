@@ -139,7 +139,9 @@ type Rule interface {
 type Analyzer interface {
 	Language() string
 	Extensions() []string
-	Parse(src []byte) (*sitter.Tree, error)
+	// Parse parses src. path is the file path (may be "" for stdin) and lets
+	// analyzers that support multiple grammars (e.g. ts vs tsx) pick the right one.
+	Parse(src []byte, path string) (*sitter.Tree, error)
 	CommentRanges(src []byte, tree *sitter.Tree) []ByteRange
 	Rules() []Rule
 }

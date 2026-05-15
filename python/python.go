@@ -2,6 +2,7 @@
 package python
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -18,10 +19,10 @@ type Analyzer struct{}
 func (Analyzer) Language() string          { return "python" }
 func (Analyzer) Extensions() []string      { return []string{".py", ".pyi"} }
 
-func (Analyzer) Parse(src []byte) (*sitter.Tree, error) {
+func (Analyzer) Parse(src []byte, _ string) (*sitter.Tree, error) {
 	parser := sitter.NewParser()
 	parser.SetLanguage(python.GetLanguage())
-	tree, err := parser.ParseCtx(nil, nil, src)
+	tree, err := parser.ParseCtx(context.Background(), nil, src)
 	if err != nil {
 		return nil, fmt.Errorf("python parse: %w", err)
 	}

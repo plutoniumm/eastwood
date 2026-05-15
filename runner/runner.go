@@ -1,4 +1,4 @@
-// Package runner orchestrates file discovery, parallel analysis, and output.
+// Package runner orchestrates file discovery, parallel analysis, caching, and output.
 package runner
 
 import (
@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"eastwood/cache"
 	"eastwood/config"
 	"eastwood/core"
 	"eastwood/output"
@@ -21,15 +22,16 @@ import (
 
 // Options configure a single run.
 type Options struct {
-	Paths    []string       // files or directories to lint; empty = CWD
-	Stdin    io.Reader      // non-nil means read from stdin (requires StdinLang)
-	StdinLang string        // language for stdin input
-	Format   output.Format
-	Jobs     int            // 0 = runtime.NumCPU()
-	Writer   io.Writer      // destination for output; defaults to os.Stdout
+	Paths     []string     // files or directories; empty = CWD
+	Stdin     io.Reader    // non-nil → read from stdin (requires StdinLang)
+	StdinLang string
+	Format    output.Format
+	Jobs      int       // 0 = runtime.NumCPU()
+	Writer    io.Writer // defaults to os.Stdout
+	Cache     *cache.Cache
 }
 
-// Run executes the linter and returns an exit code (0, 1, or 2).
+// Run executes the linter and returns an exit code: 0 clean, 1 findings, 2 error.
 func Run(ctx context.Context, analyzers []core.Analyzer, cfg *config.Config, opts Options) int {
 	if opts.Writer == nil {
 		opts.Writer = os.Stdout
@@ -39,49 +41,95 @@ func Run(ctx context.Context, analyzers []core.Analyzer, cfg *config.Config, opt
 	}
 
 	formatter := output.New(opts.Format, opts.Writer)
-	extToAnalyzer := buildExtMap(analyzers)
+	extSet := buildExtSet(analyzers)
 
-	var files []*core.SourceFile
+	// Collect file paths (not content — workers load files themselves).
+	type fileSpec struct {
+		path string
+		lang string
+	}
+
+	var specs []fileSpec
 
 	if opts.Stdin != nil {
 		data, err := io.ReadAll(opts.Stdin)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "le: reading stdin: %v\n", err)
+			fmt.Fprintf(os.Stderr, "eastwood: reading stdin: %v\n", err)
 			return 2
 		}
-		files = append(files, &core.SourceFile{
-			Path:     "<stdin>",
-			Language: opts.StdinLang,
-			Bytes:    data,
-		})
-	} else {
-		paths := opts.Paths
-		if len(paths) == 0 {
-			paths = []string{"."}
-		}
-		var err error
-		files, err = discoverFiles(paths, extToAnalyzer)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "le: discovering files: %v\n", err)
+		specs = append(specs, fileSpec{path: "<stdin>", lang: opts.StdinLang})
+		// For stdin we bypass the path queue and process directly.
+		an := analyzerFor(opts.StdinLang, analyzers)
+		if an == nil {
+			fmt.Fprintf(os.Stderr, "eastwood: no analyzer for language %q\n", opts.StdinLang)
 			return 2
 		}
-	}
-
-	if len(files) == 0 {
+		diags, errMsg := processBytes("<stdin>", data, an, cfg, opts.Cache)
+		if errMsg != "" {
+			formatter.WriteError("<stdin>", errMsg)
+			return 2
+		}
+		formatter.WriteDiagnostics(diags)
+		if hasFinding(diags, cfg.FailOn) {
+			return 1
+		}
 		return 0
 	}
 
-	// Work queue — closed once all files are enqueued.
-	work := make(chan *core.SourceFile, len(files))
-	for _, f := range files {
-		work <- f
+	paths := opts.Paths
+	if len(paths) == 0 {
+		paths = []string{"."}
+	}
+	type pathLang struct{ path, lang string }
+	var queue []pathLang
+	for _, p := range paths {
+		info, err := os.Stat(p)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "eastwood: %v\n", err)
+			return 2
+		}
+		if info.IsDir() {
+			if err := filepath.WalkDir(p, func(path string, d fs.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if d.IsDir() {
+					if strings.HasPrefix(d.Name(), ".") && d.Name() != "." {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				ext := strings.ToLower(filepath.Ext(path))
+				if !extSet[ext] {
+					return nil
+				}
+				lang := extToLang[ext]
+				queue = append(queue, pathLang{path: path, lang: lang})
+				return nil
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "eastwood: %v\n", err)
+				return 2
+			}
+		} else {
+			ext := strings.ToLower(filepath.Ext(p))
+			lang := extToLang[ext]
+			queue = append(queue, pathLang{path: p, lang: lang})
+		}
+	}
+
+	if len(queue) == 0 {
+		return 0
+	}
+
+	work := make(chan pathLang, len(queue))
+	for _, item := range queue {
+		work <- item
 	}
 	close(work)
 
-	// Results are sent per-file; we stream them to output as they arrive.
 	type result struct {
-		file  string
-		diags []core.Diagnostic
+		path   string
+		diags  []core.Diagnostic
 		errMsg string
 	}
 	results := make(chan result, opts.Jobs*2)
@@ -91,13 +139,18 @@ func Run(ctx context.Context, analyzers []core.Analyzer, cfg *config.Config, opt
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for sf := range work {
-				an := analyzerFor(sf.Language, analyzers)
+			for item := range work {
+				an := analyzerFor(item.lang, analyzers)
 				if an == nil {
 					continue
 				}
-				diags, errMsg := processFile(sf, an, cfg)
-				results <- result{file: sf.Path, diags: diags, errMsg: errMsg}
+				data, err := os.ReadFile(item.path)
+				if err != nil {
+					results <- result{path: item.path, errMsg: err.Error()}
+					continue
+				}
+				diags, errMsg := processBytes(item.path, data, an, cfg, opts.Cache)
+				results <- result{path: item.path, diags: diags, errMsg: errMsg}
 			}
 		}()
 	}
@@ -110,7 +163,7 @@ func Run(ctx context.Context, analyzers []core.Analyzer, cfg *config.Config, opt
 	maxSev := core.Severity(-1)
 	for res := range results {
 		if res.errMsg != "" {
-			formatter.WriteError(res.file, res.errMsg)
+			formatter.WriteError(res.path, res.errMsg)
 			continue
 		}
 		formatter.WriteDiagnostics(res.diags)
@@ -127,17 +180,30 @@ func Run(ctx context.Context, analyzers []core.Analyzer, cfg *config.Config, opt
 	return 0
 }
 
-// processFile parses one file, runs all enabled rules, filters diagnostics,
-// and returns them sorted by position. errMsg is non-empty on parse failure.
-func processFile(sf *core.SourceFile, an core.Analyzer, cfg *config.Config) ([]core.Diagnostic, string) {
-	tree, err := an.Parse(sf.Bytes)
+// processBytes parses and lints a single file's contents. It consults the cache
+// on entry and writes results back on a miss.
+func processBytes(path string, data []byte, an core.Analyzer, cfg *config.Config, c *cache.Cache) ([]core.Diagnostic, string) {
+	// Cache lookup.
+	if c != nil {
+		if cached, ok := c.Get(data); ok {
+			// Re-stamp the file path (cache stores it but let's be sure).
+			for i := range cached {
+				cached[i].Range.Start.File = path
+				cached[i].Range.End.File = path
+			}
+			return cached, ""
+		}
+	}
+
+	tree, err := an.Parse(data, path)
 	if err != nil {
 		return nil, fmt.Sprintf("parse error: %v", err)
 	}
 
-	commentRanges := an.CommentRanges(sf.Bytes, tree)
-	directives := parseDirectives(sf.Bytes, commentRanges)
-	langCfg := langConfig(sf.Language, cfg)
+	sf := &core.SourceFile{Path: path, Language: an.Language(), Bytes: data}
+	commentRanges := an.CommentRanges(data, tree)
+	directives := parseDirectives(data, commentRanges)
+	langCfg := cfg.LangConfig(an.Language())
 
 	ruleConfigs := make(map[string]core.RuleConfig, len(langCfg.Rules))
 	for id, rc := range langCfg.Rules {
@@ -153,11 +219,9 @@ func processFile(sf *core.SourceFile, an core.Analyzer, cfg *config.Config) ([]c
 		RuleConfigs:   ruleConfigs,
 		CommentRanges: commentRanges,
 		Report: func(d core.Diagnostic) {
-			// Suppress if in a comment range.
 			if inAnyComment(d.Range.Start.Offset, commentRanges) {
 				return
 			}
-			// Apply inline directive suppression.
 			if directives.suppresses(d.RuleID, d.Range.Start.Line) {
 				return
 			}
@@ -185,7 +249,21 @@ func processFile(sf *core.SourceFile, an core.Analyzer, cfg *config.Config) ([]c
 		return diags[i].RuleID < diags[j].RuleID
 	})
 
+	// Write to cache on miss.
+	if c != nil {
+		c.Put(data, diags)
+	}
+
 	return diags, ""
+}
+
+func hasFinding(diags []core.Diagnostic, threshold core.Severity) bool {
+	for _, d := range diags {
+		if d.Severity >= threshold {
+			return true
+		}
+	}
+	return false
 }
 
 func inAnyComment(offset int, ranges []core.ByteRange) bool {
@@ -197,25 +275,20 @@ func inAnyComment(offset int, ranges []core.ByteRange) bool {
 	return false
 }
 
-// --- inline directives ---
+// --- inline directive parsing ---
 
-// directiveSet holds suppression rules parsed from inline comments.
 type directiveSet struct {
-	fileWide map[string]bool      // ruleID -> suppress everywhere
-	lines    map[int][]string     // line number (1-indexed) -> suppressed rule IDs
+	fileWide map[string]bool
+	lines    map[int][]string
 }
 
 var directiveRe = regexp.MustCompile(`eastwood:\s*(disable|disable-next|disable-file)=([^\s]+)`)
 
-// parseDirectives scans src for inline eastwood directives embedded in comments.
-// commentRanges indicates where comments live so we only look inside them.
 func parseDirectives(src []byte, commentRanges []core.ByteRange) directiveSet {
 	ds := directiveSet{
 		fileWide: make(map[string]bool),
 		lines:    make(map[int][]string),
 	}
-
-	// Build a fast line-start index.
 	lineStarts := []int{0}
 	for i, b := range src {
 		if b == '\n' {
@@ -223,35 +296,29 @@ func parseDirectives(src []byte, commentRanges []core.ByteRange) directiveSet {
 		}
 	}
 	byteToLine := func(offset int) int {
-		line := sort.Search(len(lineStarts), func(i int) bool {
-			return lineStarts[i] > offset
-		}) - 1
+		line := sort.Search(len(lineStarts), func(i int) bool { return lineStarts[i] > offset }) - 1
 		if line < 0 {
 			line = 0
 		}
-		return line + 1 // 1-indexed
+		return line + 1
 	}
-
 	for _, r := range commentRanges {
-		segment := src[r.Start:r.End]
-		m := directiveRe.FindSubmatch(segment)
+		m := directiveRe.FindSubmatch(src[r.Start:r.End])
 		if m == nil {
 			continue
 		}
 		kind := string(m[1])
-		ruleList := strings.Split(string(m[2]), ",")
-		directiveLine := byteToLine(r.Start)
-
-		for _, ruleID := range ruleList {
+		dirLine := byteToLine(r.Start)
+		for _, ruleID := range strings.Split(string(m[2]), ",") {
 			ruleID = strings.TrimSpace(ruleID)
 			if ruleID == "" {
 				continue
 			}
 			switch kind {
 			case "disable":
-				ds.lines[directiveLine] = append(ds.lines[directiveLine], ruleID)
+				ds.lines[dirLine] = append(ds.lines[dirLine], ruleID)
 			case "disable-next":
-				ds.lines[directiveLine+1] = append(ds.lines[directiveLine+1], ruleID)
+				ds.lines[dirLine+1] = append(ds.lines[dirLine+1], ruleID)
 			case "disable-file":
 				ds.fileWide[ruleID] = true
 			}
@@ -272,82 +339,19 @@ func (ds directiveSet) suppresses(ruleID string, line int) bool {
 	return false
 }
 
-// --- file discovery ---
+// --- helpers ---
 
-func discoverFiles(paths []string, extMap map[string]bool) ([]*core.SourceFile, error) {
-	var files []*core.SourceFile
-	seen := make(map[string]bool)
-
-	for _, p := range paths {
-		info, err := os.Stat(p)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", p, err)
-		}
-		if info.IsDir() {
-			err = filepath.WalkDir(p, func(path string, d fs.DirEntry, err error) error {
-				if err != nil {
-					return err
-				}
-				if d.IsDir() {
-					if strings.HasPrefix(d.Name(), ".") && d.Name() != "." {
-						return filepath.SkipDir
-					}
-					return nil
-				}
-				if !extMap[strings.ToLower(filepath.Ext(path))] {
-					return nil
-				}
-				if seen[path] {
-					return nil
-				}
-				seen[path] = true
-				sf, err := loadFile(path)
-				if err != nil {
-					return err
-				}
-				files = append(files, sf)
-				return nil
-			})
-			if err != nil {
-				return nil, err
-			}
-		} else {
-			if seen[p] {
-				continue
-			}
-			seen[p] = true
-			sf, err := loadFile(p)
-			if err != nil {
-				return nil, err
-			}
-			files = append(files, sf)
-		}
-	}
-	return files, nil
-}
-
-func loadFile(path string) (*core.SourceFile, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	ext := strings.ToLower(filepath.Ext(path))
-	lang := extToLang[ext]
-	return &core.SourceFile{Path: path, Language: lang, Bytes: data}, nil
-}
-
-// extToLang maps known extensions to language names.
 var extToLang = map[string]string{
-	".py":  "python",
-	".pyi": "python",
-	".tex": "latex",
-	".cls": "latex",
-	".sty": "latex",
-	".bib": "latex",
+	".py": "python", ".pyi": "python",
+	".tex": "latex", ".cls": "latex", ".sty": "latex", ".bib": "latex",
+	".go":     "go",
+	".rs":     "rust",
+	".js":     "javascript", ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript",
+	".ts":     "typescript", ".tsx": "typescript", ".mts": "typescript", ".cts": "typescript",
+	".svelte": "svelte",
 }
 
-// buildExtMap returns a set of all extensions handled by the given analyzers.
-func buildExtMap(analyzers []core.Analyzer) map[string]bool {
+func buildExtSet(analyzers []core.Analyzer) map[string]bool {
 	m := make(map[string]bool)
 	for _, an := range analyzers {
 		for _, ext := range an.Extensions() {
@@ -364,15 +368,4 @@ func analyzerFor(lang string, analyzers []core.Analyzer) core.Analyzer {
 		}
 	}
 	return nil
-}
-
-func langConfig(lang string, cfg *config.Config) config.ResolvedLang {
-	switch lang {
-	case "python":
-		return cfg.Python
-	case "latex":
-		return cfg.Latex
-	default:
-		return config.ResolvedLang{}
-	}
 }

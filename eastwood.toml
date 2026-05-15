@@ -1,0 +1,33 @@
+[linter]
+fail_on = "warning"
+
+[python]
+enable = ["py/*"]
+disable = ["py/print-statement"]
+
+[latex]
+enable = ["tex/*"]
+disable = []
+
+# [latex.rules."tex/space-before-punctuation"]
+# allow_before = [":", ";", "!", "?"]
+
+[go]
+enable = ["go/*"]
+disable = ["go/todo-comment", "go/naked-return", "go/goroutine-anon"]
+
+[rust]
+enable = ["rs/*"]
+disable = ["rs/clone", "rs/print"]
+
+[javascript]
+enable = ["js/*"]
+disable = ["js/todo-comment"]
+
+[typescript]
+enable = ["js/*", "ts/*"]
+disable = ["js/todo-comment"]
+
+[svelte]
+enable = ["svelte/*"]
+disable = []

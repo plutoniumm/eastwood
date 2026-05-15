@@ -1,0 +1,12 @@
+# compiled binary
+eastwood
+dist/
+
+# test repos cloned locally
+amos/
+
+# svelte grammar C sources (downloaded by make setup-svelte)
+svelte/grammar/src/
+
+# macOS
+.DS_Store

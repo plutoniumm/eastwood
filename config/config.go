@@ -13,44 +13,54 @@ import (
 
 // File is the decoded representation of a single eastwood.toml.
 type File struct {
-	Linter linterSection            `toml:"linter"`
-	Python languageSection          `toml:"python"`
-	Latex  languageSection          `toml:"latex"`
+	Linter     linterSection   `toml:"linter"`
+	Python     languageSection `toml:"python"`
+	Latex      languageSection `toml:"latex"`
+	Go         languageSection `toml:"go"`
+	Rust       languageSection `toml:"rust"`
+	Javascript languageSection `toml:"javascript"`
+	Typescript languageSection `toml:"typescript"`
+	Svelte     languageSection `toml:"svelte"`
 }
 
 type linterSection struct {
-	FailOn string `toml:"fail_on"` // "info" | "warning" | "error"
+	FailOn string `toml:"fail_on"`
 }
 
 type languageSection struct {
-	Enable  []string                      `toml:"enable"`
-	Disable []string                      `toml:"disable"`
-	Rules   map[string]map[string]any     `toml:"rules"`
+	Enable  []string                  `toml:"enable"`
+	Disable []string                  `toml:"disable"`
+	Rules   map[string]map[string]any `toml:"rules"`
 }
 
 // Config is the resolved, merged configuration used at runtime.
 type Config struct {
-	FailOn      core.Severity
-	Python      ResolvedLang
-	Latex       ResolvedLang
+	FailOn     core.Severity
+	Python     ResolvedLang
+	Latex      ResolvedLang
+	Go         ResolvedLang
+	Rust       ResolvedLang
+	Javascript ResolvedLang
+	Typescript ResolvedLang
+	Svelte     ResolvedLang
 }
 
 type ResolvedLang struct {
 	Enable  []string
 	Disable []string
-	Rules   map[string]core.RuleConfig // rule ID -> config
+	Rules   map[string]core.RuleConfig
 }
 
 // Chain discovers and loads all eastwood.toml files from startDir up to the
-// filesystem root, then merges them from outermost to innermost (child wins).
-// Returns an error if no config file is found anywhere in the chain.
+// filesystem root, merges them outermost-first (child overrides parent).
+// Returns an error if no config file is found anywhere.
 func Chain(startDir string) (*Config, error) {
 	paths, err := findChain(startDir)
 	if err != nil {
 		return nil, err
 	}
 	if len(paths) == 0 {
-		return nil, fmt.Errorf("no eastwood.toml found in %s or any parent directory", startDir)
+		return merge(nil), nil
 	}
 
 	var files []File
@@ -61,30 +71,24 @@ func Chain(startDir string) (*Config, error) {
 		}
 		files = append(files, f)
 	}
-
 	return merge(files), nil
 }
 
-// findChain walks up from dir collecting eastwood.toml paths, returning
-// them outermost-first (root → startDir).
 func findChain(dir string) ([]string, error) {
 	dir, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, err
 	}
-
 	var found []string
 	prev := ""
 	for dir != prev {
-		candidate := filepath.Join(dir, "eastwood.toml")
-		if _, err := os.Stat(candidate); err == nil {
-			found = append(found, candidate)
+		if _, err := os.Stat(filepath.Join(dir, "eastwood.toml")); err == nil {
+			found = append(found, filepath.Join(dir, "eastwood.toml"))
 		}
 		prev = dir
 		dir = filepath.Dir(dir)
 	}
-
-	// Reverse so we get outermost first (parent wins as base, child overrides).
+	// Reverse: outermost first so child overrides parent.
 	for i, j := 0, len(found)-1; i < j; i, j = i+1, j-1 {
 		found[i], found[j] = found[j], found[i]
 	}
@@ -99,14 +103,17 @@ func loadFile(path string) (File, error) {
 	return f, nil
 }
 
-// merge applies files in order; later entries (children) override earlier ones.
 func merge(files []File) *Config {
 	cfg := &Config{
-		FailOn: core.Warning,
-		Python: ResolvedLang{Rules: make(map[string]core.RuleConfig)},
-		Latex:  ResolvedLang{Rules: make(map[string]core.RuleConfig)},
+		FailOn:     core.Warning,
+		Python:     ResolvedLang{Rules: make(map[string]core.RuleConfig)},
+		Latex:      ResolvedLang{Rules: make(map[string]core.RuleConfig)},
+		Go:         ResolvedLang{Rules: make(map[string]core.RuleConfig)},
+		Rust:       ResolvedLang{Rules: make(map[string]core.RuleConfig)},
+		Javascript: ResolvedLang{Rules: make(map[string]core.RuleConfig)},
+		Typescript: ResolvedLang{Rules: make(map[string]core.RuleConfig)},
+		Svelte:     ResolvedLang{Rules: make(map[string]core.RuleConfig)},
 	}
-
 	for _, f := range files {
 		if f.Linter.FailOn != "" {
 			if sv, err := core.ParseSeverity(f.Linter.FailOn); err == nil {
@@ -115,6 +122,11 @@ func merge(files []File) *Config {
 		}
 		applyLang(&cfg.Python, f.Python)
 		applyLang(&cfg.Latex, f.Latex)
+		applyLang(&cfg.Go, f.Go)
+		applyLang(&cfg.Rust, f.Rust)
+		applyLang(&cfg.Javascript, f.Javascript)
+		applyLang(&cfg.Typescript, f.Typescript)
+		applyLang(&cfg.Svelte, f.Svelte)
 	}
 	return cfg
 }
@@ -126,18 +138,37 @@ func applyLang(dst *ResolvedLang, src languageSection) {
 	if len(src.Disable) > 0 {
 		dst.Disable = src.Disable
 	}
-	for id, rawCfg := range src.Rules {
-		dst.Rules[id] = core.RuleConfig(rawCfg)
+	for id, raw := range src.Rules {
+		dst.Rules[id] = core.RuleConfig(raw)
 	}
 }
 
-// IsEnabled reports whether the rule with the given ID is enabled according to
-// the resolved language config. enable/disable lists support glob patterns
-// (e.g. "py/*").
-func (rl ResolvedLang) IsEnabled(ruleID string) bool {
-	// Default: enabled unless explicitly disabled.
-	enabled := true
+// LangConfig returns the ResolvedLang for the given language name.
+func (c *Config) LangConfig(lang string) ResolvedLang {
+	switch lang {
+	case "python":
+		return c.Python
+	case "latex":
+		return c.Latex
+	case "go":
+		return c.Go
+	case "rust":
+		return c.Rust
+	case "javascript":
+		return c.Javascript
+	case "typescript":
+		return c.Typescript
+	case "svelte":
+		return c.Svelte
+	default:
+		return ResolvedLang{Rules: make(map[string]core.RuleConfig)}
+	}
+}
 
+// IsEnabled reports whether ruleID is enabled according to this lang config.
+// enable/disable lists support simple glob patterns (e.g. "py/*").
+func (rl ResolvedLang) IsEnabled(ruleID string) bool {
+	enabled := true
 	if len(rl.Enable) > 0 {
 		enabled = false
 		for _, pat := range rl.Enable {
@@ -149,14 +180,12 @@ func (rl ResolvedLang) IsEnabled(ruleID string) bool {
 	}
 	for _, pat := range rl.Disable {
 		if matchGlob(pat, ruleID) {
-			enabled = false
-			break
+			return false
 		}
 	}
 	return enabled
 }
 
-// matchGlob handles simple glob patterns with a single '*' wildcard.
 func matchGlob(pattern, s string) bool {
 	if pattern == "*" {
 		return true
@@ -171,8 +200,7 @@ func matchGlob(pattern, s string) bool {
 	if star < 0 {
 		return pattern == s
 	}
-	prefix := pattern[:star]
-	suffix := pattern[star+1:]
+	prefix, suffix := pattern[:star], pattern[star+1:]
 	return len(s) >= len(prefix)+len(suffix) &&
 		s[:len(prefix)] == prefix &&
 		s[len(s)-len(suffix):] == suffix
