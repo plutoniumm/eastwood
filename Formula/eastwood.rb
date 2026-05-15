@@ -7,22 +7,22 @@ class Eastwood < Formula
   on_macos do
     on_arm do
       url "https://github.com/plutoniumm/eastwood/releases/download/v#{version}/eastwood_darwin_arm64.tar.gz"
-      sha256 "REPLACE_AFTER_FIRST_RELEASE"
+      sha256 "PLACEHOLDER_darwin_arm64"
     end
     on_intel do
       url "https://github.com/plutoniumm/eastwood/releases/download/v#{version}/eastwood_darwin_amd64.tar.gz"
-      sha256 "REPLACE_AFTER_FIRST_RELEASE"
+      sha256 "PLACEHOLDER_darwin_amd64"
     end
   end
 
   on_linux do
     on_arm do
       url "https://github.com/plutoniumm/eastwood/releases/download/v#{version}/eastwood_linux_arm64.tar.gz"
-      sha256 "REPLACE_AFTER_FIRST_RELEASE"
+      sha256 "PLACEHOLDER_linux_arm64"
     end
     on_intel do
       url "https://github.com/plutoniumm/eastwood/releases/download/v#{version}/eastwood_linux_amd64.tar.gz"
-      sha256 "REPLACE_AFTER_FIRST_RELEASE"
+      sha256 "PLACEHOLDER_linux_amd64"
     end
   end
 
