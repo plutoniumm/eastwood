@@ -2,7 +2,6 @@
 package rust
 
 import (
-	"context"
 	"fmt"
 	"strings"
 
@@ -20,24 +19,18 @@ func (Analyzer) Language() string     { return "rust" }
 func (Analyzer) Extensions() []string { return []string{".rs"} }
 
 func (Analyzer) Parse(src []byte, _ string) (*sitter.Tree, error) {
-	parser := sitter.NewParser()
-	parser.SetLanguage(sitterrust.GetLanguage())
-	tree, err := parser.ParseCtx(context.Background(), nil, src)
+	tree, err := pool.ParseBytes(src)
 	if err != nil {
 		return nil, fmt.Errorf("rust parse: %w", err)
 	}
 	return tree, nil
 }
 
-func (Analyzer) CommentRanges(src []byte, tree *sitter.Tree) []core.ByteRange {
+func (Analyzer) CommentRanges(_ []byte, tree *sitter.Tree) []core.ByteRange {
 	if tree == nil {
 		return nil
 	}
-	// Rust has line_comment and block_comment node types.
-	var ranges []core.ByteRange
-	ranges = append(ranges, tsutil.CommentRangesFromTree(tree, "line_comment")...)
-	ranges = append(ranges, tsutil.CommentRangesFromTree(tree, "block_comment")...)
-	return ranges
+	return tsutil.CommentRangesFromTree(tree, "line_comment", "block_comment")
 }
 
 func (Analyzer) Rules() []core.Rule {
@@ -55,32 +48,41 @@ func (Analyzer) Rules() []core.Rule {
 	}
 }
 
-var lang = sitterrust.GetLanguage()
+var (
+	lang = sitterrust.GetLanguage()
+	pool = tsutil.NewParserPool(lang)
+
+	methodCallQ = tsutil.MustQuery(`
+(call_expression
+  function: (field_expression
+    field: (field_identifier) @method)) @call
+`, lang)
+
+	macroQ = tsutil.MustQuery(`(macro_invocation macro: (identifier) @name) @mac`, lang)
+
+	unsafeQ = tsutil.MustQuery(`(unsafe_block) @blk`, lang)
+
+	attrQ = tsutil.MustQuery(`
+(attribute_item
+  (attribute
+    (identifier) @name)) @attr
+`, lang)
+)
 
 func nodeText(node *sitter.Node, src []byte) string {
 	return string(src[node.StartByte():node.EndByte()])
 }
 
-// methodCallQuery matches method calls: expr.method(args)
-const methodCallQuery = `
-(call_expression
-  function: (field_expression
-    field: (field_identifier) @method)) @call
-`
-
-// macroQuery matches macro invocations: name!(...)
-const macroQuery = `(macro_invocation macro: (identifier) @name) @mac`
-
 // --- rule: rs/unwrap ---
 
 type rsUnwrap struct{}
 
-func (rsUnwrap) ID() string               { return "rs/unwrap" }
-func (rsUnwrap) Description() string      { return ".unwrap() call; propagate errors with ? instead" }
+func (rsUnwrap) ID() string                    { return "rs/unwrap" }
+func (rsUnwrap) Description() string           { return ".unwrap() call; propagate errors with ? instead" }
 func (rsUnwrap) DefaultSeverity() core.Severity { return core.Warning }
 
 func (r rsUnwrap) Check(ctx *core.RunContext) {
-	for cap := range tsutil.Query(ctx.Tree, ctx.File.Bytes, methodCallQuery, lang) {
+	for cap := range methodCallQ.Run(ctx.Tree, ctx.File.Bytes) {
 		if cap.Name == "method" && nodeText(cap.Node, ctx.File.Bytes) == "unwrap" {
 			ctx.Report(core.Diagnostic{
 				RuleID:   r.ID(),
@@ -96,12 +98,12 @@ func (r rsUnwrap) Check(ctx *core.RunContext) {
 
 type rsExpect struct{}
 
-func (rsExpect) ID() string               { return "rs/expect" }
-func (rsExpect) Description() string      { return ".expect() call; propagate errors with ? instead" }
+func (rsExpect) ID() string                    { return "rs/expect" }
+func (rsExpect) Description() string           { return ".expect() call; propagate errors with ? instead" }
 func (rsExpect) DefaultSeverity() core.Severity { return core.Warning }
 
 func (r rsExpect) Check(ctx *core.RunContext) {
-	for cap := range tsutil.Query(ctx.Tree, ctx.File.Bytes, methodCallQuery, lang) {
+	for cap := range methodCallQ.Run(ctx.Tree, ctx.File.Bytes) {
 		if cap.Name == "method" && nodeText(cap.Node, ctx.File.Bytes) == "expect" {
 			ctx.Report(core.Diagnostic{
 				RuleID:   r.ID(),
@@ -117,12 +119,12 @@ func (r rsExpect) Check(ctx *core.RunContext) {
 
 type rsPanic struct{}
 
-func (rsPanic) ID() string               { return "rs/panic" }
-func (rsPanic) Description() string      { return "panic!() macro" }
+func (rsPanic) ID() string                    { return "rs/panic" }
+func (rsPanic) Description() string           { return "panic!() macro" }
 func (rsPanic) DefaultSeverity() core.Severity { return core.Warning }
 
 func (r rsPanic) Check(ctx *core.RunContext) {
-	for cap := range tsutil.Query(ctx.Tree, ctx.File.Bytes, macroQuery, lang) {
+	for cap := range macroQ.Run(ctx.Tree, ctx.File.Bytes) {
 		if cap.Name == "name" && nodeText(cap.Node, ctx.File.Bytes) == "panic" {
 			ctx.Report(core.Diagnostic{
 				RuleID:   r.ID(),
@@ -138,12 +140,12 @@ func (r rsPanic) Check(ctx *core.RunContext) {
 
 type rsTodo struct{}
 
-func (rsTodo) ID() string               { return "rs/todo" }
-func (rsTodo) Description() string      { return "todo!() macro left in code" }
+func (rsTodo) ID() string                    { return "rs/todo" }
+func (rsTodo) Description() string           { return "todo!() macro left in code" }
 func (rsTodo) DefaultSeverity() core.Severity { return core.Warning }
 
 func (r rsTodo) Check(ctx *core.RunContext) {
-	for cap := range tsutil.Query(ctx.Tree, ctx.File.Bytes, macroQuery, lang) {
+	for cap := range macroQ.Run(ctx.Tree, ctx.File.Bytes) {
 		if cap.Name == "name" && nodeText(cap.Node, ctx.File.Bytes) == "todo" {
 			ctx.Report(core.Diagnostic{
 				RuleID:   r.ID(),
@@ -159,12 +161,12 @@ func (r rsTodo) Check(ctx *core.RunContext) {
 
 type rsUnimplemented struct{}
 
-func (rsUnimplemented) ID() string               { return "rs/unimplemented" }
-func (rsUnimplemented) Description() string      { return "unimplemented!() macro" }
+func (rsUnimplemented) ID() string                    { return "rs/unimplemented" }
+func (rsUnimplemented) Description() string           { return "unimplemented!() macro" }
 func (rsUnimplemented) DefaultSeverity() core.Severity { return core.Warning }
 
 func (r rsUnimplemented) Check(ctx *core.RunContext) {
-	for cap := range tsutil.Query(ctx.Tree, ctx.File.Bytes, macroQuery, lang) {
+	for cap := range macroQ.Run(ctx.Tree, ctx.File.Bytes) {
 		if cap.Name == "name" && nodeText(cap.Node, ctx.File.Bytes) == "unimplemented" {
 			ctx.Report(core.Diagnostic{
 				RuleID:   r.ID(),
@@ -180,12 +182,12 @@ func (r rsUnimplemented) Check(ctx *core.RunContext) {
 
 type rsDbg struct{}
 
-func (rsDbg) ID() string               { return "rs/dbg" }
-func (rsDbg) Description() string      { return "dbg!() macro left in code" }
+func (rsDbg) ID() string                    { return "rs/dbg" }
+func (rsDbg) Description() string           { return "dbg!() macro left in code" }
 func (rsDbg) DefaultSeverity() core.Severity { return core.Warning }
 
 func (r rsDbg) Check(ctx *core.RunContext) {
-	for cap := range tsutil.Query(ctx.Tree, ctx.File.Bytes, macroQuery, lang) {
+	for cap := range macroQ.Run(ctx.Tree, ctx.File.Bytes) {
 		if cap.Name == "name" && nodeText(cap.Node, ctx.File.Bytes) == "dbg" {
 			ctx.Report(core.Diagnostic{
 				RuleID:   r.ID(),
@@ -201,14 +203,12 @@ func (r rsDbg) Check(ctx *core.RunContext) {
 
 type rsUnsafeBlock struct{}
 
-const unsafeQuery = `(unsafe_block) @blk`
-
-func (rsUnsafeBlock) ID() string               { return "rs/unsafe-block" }
-func (rsUnsafeBlock) Description() string      { return "unsafe block requires manual safety audit" }
+func (rsUnsafeBlock) ID() string                    { return "rs/unsafe-block" }
+func (rsUnsafeBlock) Description() string           { return "unsafe block requires manual safety audit" }
 func (rsUnsafeBlock) DefaultSeverity() core.Severity { return core.Warning }
 
 func (r rsUnsafeBlock) Check(ctx *core.RunContext) {
-	for cap := range tsutil.Query(ctx.Tree, ctx.File.Bytes, unsafeQuery, lang) {
+	for cap := range unsafeQ.Run(ctx.Tree, ctx.File.Bytes) {
 		ctx.Report(core.Diagnostic{
 			RuleID:   r.ID(),
 			Severity: r.DefaultSeverity(),
@@ -222,19 +222,12 @@ func (r rsUnsafeBlock) Check(ctx *core.RunContext) {
 
 type rsAllowAttribute struct{}
 
-const attrQuery = `
-(attribute_item
-  (attribute
-    (identifier) @name)) @attr
-`
-
-func (rsAllowAttribute) ID() string               { return "rs/allow-attribute" }
-func (rsAllowAttribute) Description() string      { return "#[allow(...)] suppresses compiler warnings" }
+func (rsAllowAttribute) ID() string                    { return "rs/allow-attribute" }
+func (rsAllowAttribute) Description() string           { return "#[allow(...)] suppresses compiler warnings" }
 func (rsAllowAttribute) DefaultSeverity() core.Severity { return core.Info }
 
 func (r rsAllowAttribute) Check(ctx *core.RunContext) {
 	cfg := ctx.RuleConfig(r.ID())
-	// configurable list of lint names to flag; default flags unused/dead_code.
 	flagged := cfg.Strings("flag")
 	if len(flagged) == 0 {
 		flagged = []string{"unused", "dead_code", "unused_variables", "unused_imports"}
@@ -245,11 +238,10 @@ func (r rsAllowAttribute) Check(ctx *core.RunContext) {
 	}
 
 	seen := map[uint32]bool{}
-	for cap := range tsutil.Query(ctx.Tree, ctx.File.Bytes, attrQuery, lang) {
+	for cap := range attrQ.Run(ctx.Tree, ctx.File.Bytes) {
 		if cap.Name != "attr" || seen[cap.Node.StartByte()] {
 			continue
 		}
-		// Check if the attribute name is "allow".
 		attr := cap.Node.NamedChild(0)
 		if attr == nil || attr.NamedChildCount() == 0 {
 			continue
@@ -258,7 +250,6 @@ func (r rsAllowAttribute) Check(ctx *core.RunContext) {
 		if nameNode == nil || nodeText(nameNode, ctx.File.Bytes) != "allow" {
 			continue
 		}
-		// Check the lint arguments.
 		if attr.NamedChildCount() < 2 {
 			continue
 		}
@@ -282,12 +273,12 @@ func (r rsAllowAttribute) Check(ctx *core.RunContext) {
 
 type rsClone struct{}
 
-func (rsClone) ID() string               { return "rs/clone" }
-func (rsClone) Description() string      { return ".clone() call; verify it is necessary" }
+func (rsClone) ID() string                    { return "rs/clone" }
+func (rsClone) Description() string           { return ".clone() call; verify it is necessary" }
 func (rsClone) DefaultSeverity() core.Severity { return core.Info }
 
 func (r rsClone) Check(ctx *core.RunContext) {
-	for cap := range tsutil.Query(ctx.Tree, ctx.File.Bytes, methodCallQuery, lang) {
+	for cap := range methodCallQ.Run(ctx.Tree, ctx.File.Bytes) {
 		if cap.Name == "method" && nodeText(cap.Node, ctx.File.Bytes) == "clone" {
 			ctx.Report(core.Diagnostic{
 				RuleID:   r.ID(),
@@ -303,13 +294,14 @@ func (r rsClone) Check(ctx *core.RunContext) {
 
 type rsPrint struct{}
 
-func (rsPrint) ID() string               { return "rs/print" }
-func (rsPrint) Description() string      { return "println!/print!/eprintln! macro left in code" }
+func (rsPrint) ID() string                    { return "rs/print" }
+func (rsPrint) Description() string           { return "println!/print!/eprintln! macro left in code" }
 func (rsPrint) DefaultSeverity() core.Severity { return core.Info }
 
+var printMacros = map[string]bool{"println": true, "print": true, "eprintln": true, "eprint": true}
+
 func (r rsPrint) Check(ctx *core.RunContext) {
-	printMacros := map[string]bool{"println": true, "print": true, "eprintln": true, "eprint": true}
-	for cap := range tsutil.Query(ctx.Tree, ctx.File.Bytes, macroQuery, lang) {
+	for cap := range macroQ.Run(ctx.Tree, ctx.File.Bytes) {
 		if cap.Name == "name" && printMacros[nodeText(cap.Node, ctx.File.Bytes)] {
 			ctx.Report(core.Diagnostic{
 				RuleID:   r.ID(),

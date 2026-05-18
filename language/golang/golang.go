@@ -2,7 +2,6 @@
 package golang
 
 import (
-	"context"
 	"fmt"
 	"strings"
 
@@ -16,19 +15,18 @@ import (
 // Analyzer implements core.Analyzer for Go source files.
 type Analyzer struct{}
 
-func (Analyzer) Language() string          { return "go" }
-func (Analyzer) Extensions() []string      { return []string{".go"} }
+func (Analyzer) Language() string     { return "go" }
+func (Analyzer) Extensions() []string { return []string{".go"} }
+
 func (Analyzer) Parse(src []byte, _ string) (*sitter.Tree, error) {
-	parser := sitter.NewParser()
-	parser.SetLanguage(sittergo.GetLanguage())
-	tree, err := parser.ParseCtx(context.Background(), nil, src)
+	tree, err := pool.ParseBytes(src)
 	if err != nil {
 		return nil, fmt.Errorf("go parse: %w", err)
 	}
 	return tree, nil
 }
 
-func (Analyzer) CommentRanges(src []byte, tree *sitter.Tree) []core.ByteRange {
+func (Analyzer) CommentRanges(_ []byte, tree *sitter.Tree) []core.ByteRange {
 	if tree == nil {
 		return nil
 	}
@@ -50,13 +48,40 @@ func (Analyzer) Rules() []core.Rule {
 	}
 }
 
-var lang = sittergo.GetLanguage()
+var (
+	lang = sittergo.GetLanguage()
+	pool = tsutil.NewParserPool(lang)
+
+	emptyIfaceQ    = tsutil.MustQuery(`(interface_type) @iface`, lang)
+	callQ          = tsutil.MustQuery(`(call_expression function: (identifier) @fn) @call`, lang)
+	errofQ         = tsutil.MustQuery(`
+(call_expression
+  function: (selector_expression
+    operand: (identifier) @pkg
+    field: (field_identifier) @fn)
+  arguments: (argument_list
+    [(interpreted_string_literal) (raw_string_literal)] @fmt)) @call
+`, lang)
+	deferQ         = tsutil.MustQuery(`(defer_statement) @def`, lang)
+	commentQ       = tsutil.MustQuery(`(comment) @c`, lang)
+	returnQ        = tsutil.MustQuery(`(return_statement) @ret`, lang)
+	goroutineAnonQ = tsutil.MustQuery(`
+(go_statement
+  (call_expression
+    function: (func_literal))) @goroutine
+`, lang)
+	selectorCallQ  = tsutil.MustQuery(`
+(call_expression
+  function: (selector_expression
+    operand: (identifier) @pkg
+    field: (field_identifier) @fn)) @call
+`, lang)
+)
 
 func nodeText(node *sitter.Node, src []byte) string {
 	return string(src[node.StartByte():node.EndByte()])
 }
 
-// hasAncestor reports whether any ancestor of node has the given type.
 func hasAncestor(node *sitter.Node, typeName string) bool {
 	cur := node.Parent()
 	for cur != nil {
@@ -66,109 +91,6 @@ func hasAncestor(node *sitter.Node, typeName string) bool {
 		cur = cur.Parent()
 	}
 	return false
-}
-
-// --- rule: go/empty-interface ---
-
-type goEmptyInterface struct{}
-
-const emptyIfaceQuery = `(interface_type) @iface`
-
-func (goEmptyInterface) ID() string               { return "go/empty-interface" }
-func (goEmptyInterface) Description() string      { return "interface{} usage; use 'any' instead (Go 1.18+)" }
-func (goEmptyInterface) DefaultSeverity() core.Severity { return core.Warning }
-
-func (r goEmptyInterface) Check(ctx *core.RunContext) {
-	for cap := range tsutil.Query(ctx.Tree, ctx.File.Bytes, emptyIfaceQuery, lang) {
-		if cap.Node.NamedChildCount() == 0 {
-			ctx.Report(core.Diagnostic{
-				RuleID:   r.ID(),
-				Severity: r.DefaultSeverity(),
-				Message:  "use 'any' instead of 'interface{}'",
-				Range:    tsutil.NodeRange(cap.Node, ctx.File.Bytes, ctx.File.Path),
-			})
-		}
-	}
-}
-
-// --- rule: go/panic ---
-
-type goPanic struct{}
-
-const goPanicQuery = `(call_expression function: (identifier) @fn) @call`
-
-func (goPanic) ID() string               { return "go/panic" }
-func (goPanic) Description() string      { return "panic() call" }
-func (goPanic) DefaultSeverity() core.Severity { return core.Warning }
-
-func (r goPanic) Check(ctx *core.RunContext) {
-	for cap := range tsutil.Query(ctx.Tree, ctx.File.Bytes, goPanicQuery, lang) {
-		if cap.Name == "fn" && nodeText(cap.Node, ctx.File.Bytes) == "panic" {
-			ctx.Report(core.Diagnostic{
-				RuleID:   r.ID(),
-				Severity: r.DefaultSeverity(),
-				Message:  "panic() in non-test code; prefer returning an error",
-				Range:    tsutil.NodeRange(cap.Node, ctx.File.Bytes, ctx.File.Path),
-			})
-		}
-	}
-}
-
-// --- rule: go/errorf-no-wrap ---
-
-type goErrofNoWrap struct{}
-
-const errofQuery = `
-(call_expression
-  function: (selector_expression
-    operand: (identifier) @pkg
-    field: (field_identifier) @fn)
-  arguments: (argument_list
-    [(interpreted_string_literal) (raw_string_literal)] @fmt)) @call
-`
-
-func (goErrofNoWrap) ID() string               { return "go/errorf-no-wrap" }
-func (goErrofNoWrap) Description() string      { return "fmt.Errorf without %w loses error wrapping" }
-func (goErrofNoWrap) DefaultSeverity() core.Severity { return core.Warning }
-
-func (r goErrofNoWrap) Check(ctx *core.RunContext) {
-	seen := map[uint32]bool{} // track call nodes already reported
-	for cap := range tsutil.Query(ctx.Tree, ctx.File.Bytes, errofQuery, lang) {
-		if cap.Name != "call" {
-			continue
-		}
-		call := cap.Node
-		if seen[call.StartByte()] {
-			continue
-		}
-		pkgNode := call.ChildByFieldName("function")
-		if pkgNode == nil {
-			continue
-		}
-		// Extract pkg and fn from selector_expression children.
-		pkg, fn := selectorParts(pkgNode, ctx.File.Bytes)
-		if pkg != "fmt" || fn != "Errorf" {
-			continue
-		}
-		// Get format string (first argument).
-		args := call.ChildByFieldName("arguments")
-		if args == nil || args.NamedChildCount() == 0 {
-			continue
-		}
-		fmtStr := nodeText(args.NamedChild(0), ctx.File.Bytes)
-		fmtStr = strings.Trim(fmtStr, "`\"")
-		if (strings.Contains(fmtStr, "%s") || strings.Contains(fmtStr, "%v")) &&
-			!strings.Contains(fmtStr, "%w") &&
-			args.NamedChildCount() > 1 {
-			seen[call.StartByte()] = true
-			ctx.Report(core.Diagnostic{
-				RuleID:   r.ID(),
-				Severity: r.DefaultSeverity(),
-				Message:  "fmt.Errorf uses %s/%v for error; use %w to preserve the error chain",
-				Range:    tsutil.NodeRange(call, ctx.File.Bytes, ctx.File.Path),
-			})
-		}
-	}
 }
 
 func selectorParts(node *sitter.Node, src []byte) (pkg, field string) {
@@ -184,18 +106,103 @@ func selectorParts(node *sitter.Node, src []byte) (pkg, field string) {
 	return
 }
 
+// --- rule: go/empty-interface ---
+
+type goEmptyInterface struct{}
+
+func (goEmptyInterface) ID() string                    { return "go/empty-interface" }
+func (goEmptyInterface) Description() string           { return "interface{} usage; use 'any' instead (Go 1.18+)" }
+func (goEmptyInterface) DefaultSeverity() core.Severity { return core.Warning }
+
+func (r goEmptyInterface) Check(ctx *core.RunContext) {
+	for cap := range emptyIfaceQ.Run(ctx.Tree, ctx.File.Bytes) {
+		if cap.Node.NamedChildCount() == 0 {
+			ctx.Report(core.Diagnostic{
+				RuleID:   r.ID(),
+				Severity: r.DefaultSeverity(),
+				Message:  "use 'any' instead of 'interface{}'",
+				Range:    tsutil.NodeRange(cap.Node, ctx.File.Bytes, ctx.File.Path),
+			})
+		}
+	}
+}
+
+// --- rule: go/panic ---
+
+type goPanic struct{}
+
+func (goPanic) ID() string                    { return "go/panic" }
+func (goPanic) Description() string           { return "panic() call" }
+func (goPanic) DefaultSeverity() core.Severity { return core.Warning }
+
+func (r goPanic) Check(ctx *core.RunContext) {
+	for cap := range callQ.Run(ctx.Tree, ctx.File.Bytes) {
+		if cap.Name == "fn" && nodeText(cap.Node, ctx.File.Bytes) == "panic" {
+			ctx.Report(core.Diagnostic{
+				RuleID:   r.ID(),
+				Severity: r.DefaultSeverity(),
+				Message:  "panic() in non-test code; prefer returning an error",
+				Range:    tsutil.NodeRange(cap.Node, ctx.File.Bytes, ctx.File.Path),
+			})
+		}
+	}
+}
+
+// --- rule: go/errorf-no-wrap ---
+
+type goErrofNoWrap struct{}
+
+func (goErrofNoWrap) ID() string                    { return "go/errorf-no-wrap" }
+func (goErrofNoWrap) Description() string           { return "fmt.Errorf without %w loses error wrapping" }
+func (goErrofNoWrap) DefaultSeverity() core.Severity { return core.Warning }
+
+func (r goErrofNoWrap) Check(ctx *core.RunContext) {
+	seen := map[uint32]bool{}
+	for cap := range errofQ.Run(ctx.Tree, ctx.File.Bytes) {
+		if cap.Name != "call" {
+			continue
+		}
+		call := cap.Node
+		if seen[call.StartByte()] {
+			continue
+		}
+		fnNode := call.ChildByFieldName("function")
+		if fnNode == nil {
+			continue
+		}
+		pkg, fn := selectorParts(fnNode, ctx.File.Bytes)
+		if pkg != "fmt" || fn != "Errorf" {
+			continue
+		}
+		args := call.ChildByFieldName("arguments")
+		if args == nil || args.NamedChildCount() == 0 {
+			continue
+		}
+		fmtStr := strings.Trim(nodeText(args.NamedChild(0), ctx.File.Bytes), "`\"")
+		if (strings.Contains(fmtStr, "%s") || strings.Contains(fmtStr, "%v")) &&
+			!strings.Contains(fmtStr, "%w") &&
+			args.NamedChildCount() > 1 {
+			seen[call.StartByte()] = true
+			ctx.Report(core.Diagnostic{
+				RuleID:   r.ID(),
+				Severity: r.DefaultSeverity(),
+				Message:  "fmt.Errorf uses %s/%v for error; use %w to preserve the error chain",
+				Range:    tsutil.NodeRange(call, ctx.File.Bytes, ctx.File.Path),
+			})
+		}
+	}
+}
+
 // --- rule: go/defer-in-loop ---
 
 type goDeferInLoop struct{}
 
-const deferQuery = `(defer_statement) @def`
-
-func (goDeferInLoop) ID() string               { return "go/defer-in-loop" }
-func (goDeferInLoop) Description() string      { return "defer inside a loop may not execute when expected" }
+func (goDeferInLoop) ID() string                    { return "go/defer-in-loop" }
+func (goDeferInLoop) Description() string           { return "defer inside a loop may not execute when expected" }
 func (goDeferInLoop) DefaultSeverity() core.Severity { return core.Warning }
 
 func (r goDeferInLoop) Check(ctx *core.RunContext) {
-	for cap := range tsutil.Query(ctx.Tree, ctx.File.Bytes, deferQuery, lang) {
+	for cap := range deferQ.Run(ctx.Tree, ctx.File.Bytes) {
 		if hasAncestor(cap.Node, "for_statement") {
 			ctx.Report(core.Diagnostic{
 				RuleID:   r.ID(),
@@ -211,14 +218,12 @@ func (r goDeferInLoop) Check(ctx *core.RunContext) {
 
 type goTodoComment struct{}
 
-const goCommentQuery = `(comment) @c`
-
-func (goTodoComment) ID() string               { return "go/todo-comment" }
-func (goTodoComment) Description() string      { return "TODO/FIXME/HACK comment left in code" }
+func (goTodoComment) ID() string                    { return "go/todo-comment" }
+func (goTodoComment) Description() string           { return "TODO/FIXME/HACK comment left in code" }
 func (goTodoComment) DefaultSeverity() core.Severity { return core.Info }
 
 func (r goTodoComment) Check(ctx *core.RunContext) {
-	for cap := range tsutil.Query(ctx.Tree, ctx.File.Bytes, goCommentQuery, lang) {
+	for cap := range commentQ.Run(ctx.Tree, ctx.File.Bytes) {
 		text := strings.ToUpper(nodeText(cap.Node, ctx.File.Bytes))
 		var kind string
 		switch {
@@ -246,14 +251,12 @@ func (r goTodoComment) Check(ctx *core.RunContext) {
 
 type goNakedReturn struct{}
 
-const returnQuery = `(return_statement) @ret`
-
-func (goNakedReturn) ID() string               { return "go/naked-return" }
-func (goNakedReturn) Description() string      { return "bare return statement in named-result function" }
+func (goNakedReturn) ID() string                    { return "go/naked-return" }
+func (goNakedReturn) Description() string           { return "bare return statement in named-result function" }
 func (goNakedReturn) DefaultSeverity() core.Severity { return core.Info }
 
 func (r goNakedReturn) Check(ctx *core.RunContext) {
-	for cap := range tsutil.Query(ctx.Tree, ctx.File.Bytes, returnQuery, lang) {
+	for cap := range returnQ.Run(ctx.Tree, ctx.File.Bytes) {
 		if cap.Node.NamedChildCount() == 0 {
 			ctx.Report(core.Diagnostic{
 				RuleID:   r.ID(),
@@ -269,18 +272,12 @@ func (r goNakedReturn) Check(ctx *core.RunContext) {
 
 type goGoroutineAnon struct{}
 
-const goroutineAnonQuery = `
-(go_statement
-  (call_expression
-    function: (func_literal))) @goroutine
-`
-
-func (goGoroutineAnon) ID() string               { return "go/goroutine-anon" }
-func (goGoroutineAnon) Description() string      { return "anonymous goroutine; easy to leak and hard to trace" }
+func (goGoroutineAnon) ID() string                    { return "go/goroutine-anon" }
+func (goGoroutineAnon) Description() string           { return "anonymous goroutine; easy to leak and hard to trace" }
 func (goGoroutineAnon) DefaultSeverity() core.Severity { return core.Info }
 
 func (r goGoroutineAnon) Check(ctx *core.RunContext) {
-	for cap := range tsutil.Query(ctx.Tree, ctx.File.Bytes, goroutineAnonQuery, lang) {
+	for cap := range goroutineAnonQ.Run(ctx.Tree, ctx.File.Bytes) {
 		ctx.Report(core.Diagnostic{
 			RuleID:   r.ID(),
 			Severity: r.DefaultSeverity(),
@@ -294,14 +291,13 @@ func (r goGoroutineAnon) Check(ctx *core.RunContext) {
 
 type goBuildTagOld struct{}
 
-func (goBuildTagOld) ID() string               { return "go/build-tag-old" }
-func (goBuildTagOld) Description() string      { return "old-style //go:build constraint" }
+func (goBuildTagOld) ID() string                    { return "go/build-tag-old" }
+func (goBuildTagOld) Description() string           { return "old-style //go:build constraint" }
 func (goBuildTagOld) DefaultSeverity() core.Severity { return core.Warning }
 
 func (r goBuildTagOld) Check(ctx *core.RunContext) {
-	for cap := range tsutil.Query(ctx.Tree, ctx.File.Bytes, goCommentQuery, lang) {
-		text := nodeText(cap.Node, ctx.File.Bytes)
-		if strings.HasPrefix(text, "// +build ") {
+	for cap := range commentQ.Run(ctx.Tree, ctx.File.Bytes) {
+		if strings.HasPrefix(nodeText(cap.Node, ctx.File.Bytes), "// +build ") {
 			ctx.Report(core.Diagnostic{
 				RuleID:   r.ID(),
 				Severity: r.DefaultSeverity(),
@@ -316,20 +312,13 @@ func (r goBuildTagOld) Check(ctx *core.RunContext) {
 
 type goPrint struct{}
 
-const printQuery = `
-(call_expression
-  function: (selector_expression
-    operand: (identifier) @pkg
-    field: (field_identifier) @fn)) @call
-`
-
-func (goPrint) ID() string               { return "go/print" }
-func (goPrint) Description() string      { return "fmt.Print/Println/Printf left in code" }
+func (goPrint) ID() string                    { return "go/print" }
+func (goPrint) Description() string           { return "fmt.Print/Println/Printf left in code" }
 func (goPrint) DefaultSeverity() core.Severity { return core.Info }
 
 func (r goPrint) Check(ctx *core.RunContext) {
 	seen := map[uint32]bool{}
-	for cap := range tsutil.Query(ctx.Tree, ctx.File.Bytes, printQuery, lang) {
+	for cap := range selectorCallQ.Run(ctx.Tree, ctx.File.Bytes) {
 		if cap.Name != "call" || seen[cap.Node.StartByte()] {
 			continue
 		}
@@ -358,13 +347,13 @@ func (r goPrint) Check(ctx *core.RunContext) {
 
 type goOsExit struct{}
 
-func (goOsExit) ID() string               { return "go/os-exit" }
-func (goOsExit) Description() string      { return "os.Exit call skips deferred functions" }
+func (goOsExit) ID() string                    { return "go/os-exit" }
+func (goOsExit) Description() string           { return "os.Exit call skips deferred functions" }
 func (goOsExit) DefaultSeverity() core.Severity { return core.Warning }
 
 func (r goOsExit) Check(ctx *core.RunContext) {
 	seen := map[uint32]bool{}
-	for cap := range tsutil.Query(ctx.Tree, ctx.File.Bytes, printQuery, lang) {
+	for cap := range selectorCallQ.Run(ctx.Tree, ctx.File.Bytes) {
 		if cap.Name != "call" || seen[cap.Node.StartByte()] {
 			continue
 		}

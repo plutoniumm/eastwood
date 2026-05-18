@@ -5,14 +5,13 @@
 package svelte
 
 import (
-	"context"
 	"fmt"
 	"regexp"
 	"sort"
 	"strings"
 
 	"eastwood/core"
-	"eastwood/svelte/grammar"
+	"eastwood/language/svelte/grammar"
 	"eastwood/tsutil"
 
 	sitter "github.com/smacker/go-tree-sitter"
@@ -24,14 +23,18 @@ type Analyzer struct{}
 func (Analyzer) Language() string     { return "svelte" }
 func (Analyzer) Extensions() []string { return []string{".svelte"} }
 
-func (Analyzer) Parse(src []byte, _ string) (*sitter.Tree, error) {
-	lang := grammar.GetLanguage()
-	if lang == nil {
-		return nil, nil // text-only mode
+var sveltePool = func() *tsutil.ParserPool {
+	if l := grammar.GetLanguage(); l != nil {
+		return tsutil.NewParserPool(l)
 	}
-	parser := sitter.NewParser()
-	parser.SetLanguage(lang)
-	tree, err := parser.ParseCtx(context.Background(), nil, src)
+	return nil
+}()
+
+func (Analyzer) Parse(src []byte, _ string) (*sitter.Tree, error) {
+	if sveltePool == nil {
+		return nil, nil // text-only mode: grammar C sources not compiled in
+	}
+	tree, err := sveltePool.ParseBytes(src)
 	if err != nil {
 		return nil, fmt.Errorf("svelte parse: %w", err)
 	}

@@ -2,7 +2,6 @@
 package python
 
 import (
-	"context"
 	"fmt"
 	"strings"
 
@@ -20,9 +19,7 @@ func (Analyzer) Language() string          { return "python" }
 func (Analyzer) Extensions() []string      { return []string{".py", ".pyi"} }
 
 func (Analyzer) Parse(src []byte, _ string) (*sitter.Tree, error) {
-	parser := sitter.NewParser()
-	parser.SetLanguage(python.GetLanguage())
-	tree, err := parser.ParseCtx(context.Background(), nil, src)
+	tree, err := pool.ParseBytes(src)
 	if err != nil {
 		return nil, fmt.Errorf("python parse: %w", err)
 	}
@@ -51,7 +48,10 @@ func (Analyzer) Rules() []core.Rule {
 	}
 }
 
-var lang = python.GetLanguage()
+var (
+	lang = python.GetLanguage()
+	pool = tsutil.NewParserPool(lang)
+)
 
 // --- helper ---
 
