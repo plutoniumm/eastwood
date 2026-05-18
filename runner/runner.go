@@ -2,6 +2,7 @@
 package runner
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -32,7 +33,7 @@ type Options struct {
 }
 
 // Run executes the linter and returns an exit code: 0 clean, 1 findings, 2 error.
-func Run(ctx context.Context, analyzers []core.Analyzer, cfg *config.Config, opts Options) int {
+func Run(ctx context.Context, analyzers []core.Analyzer, cfg *config.Config, opts Options) (exitCode int) {
 	if opts.Writer == nil {
 		opts.Writer = os.Stdout
 	}
@@ -40,7 +41,10 @@ func Run(ctx context.Context, analyzers []core.Analyzer, cfg *config.Config, opt
 		opts.Jobs = runtime.NumCPU()
 	}
 
-	formatter := output.New(opts.Format, opts.Writer)
+	buf := bufio.NewWriterSize(opts.Writer, 256*1024)
+	defer buf.Flush()
+
+	formatter := output.New(opts.Format, buf)
 	extSet := buildExtSet(analyzers)
 
 	// Collect file paths (not content — workers load files themselves).
@@ -160,8 +164,17 @@ func Run(ctx context.Context, analyzers []core.Analyzer, cfg *config.Config, opt
 		close(results)
 	}()
 
-	maxSev := core.Severity(-1)
+	// Collect all results, then sort by path for deterministic output.
+	var allResults []result
 	for res := range results {
+		allResults = append(allResults, res)
+	}
+	sort.Slice(allResults, func(i, j int) bool {
+		return allResults[i].path < allResults[j].path
+	})
+
+	maxSev := core.Severity(-1)
+	for _, res := range allResults {
 		if res.errMsg != "" {
 			formatter.WriteError(res.path, res.errMsg)
 			continue

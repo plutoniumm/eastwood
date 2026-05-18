@@ -95,6 +95,7 @@ func hasAncestor(node *sitter.Node, types ...string) bool {
 
 // jsRules returns the shared JS/TS rules compiled for the given language.
 func jsRules(l *sitter.Language) []core.Rule {
+	identCallQ := tsutil.MustQuery(`(call_expression function: (identifier) @fn) @call`, l)
 	return []core.Rule{
 		jsTripleEquality{q: tsutil.MustQuery(`(binary_expression operator: ["==" "!="] @op) @expr`, l)},
 		jsNoVar{q: tsutil.MustQuery(`(variable_declaration) @decl`, l)},
@@ -112,6 +113,9 @@ func jsRules(l *sitter.Language) []core.Rule {
 		jsAwaitInLoop{q: tsutil.MustQuery(`(await_expression) @await`, l)},
 		jsTemplateNoExpression{q: tsutil.MustQuery(`(template_string) @tmpl`, l)},
 		jsTodoComment{q: tsutil.MustQuery(`(comment) @c`, l)},
+		jsNoEval{q: identCallQ},
+		jsNoAlert{q: identCallQ},
+		jsNoNewWrapper{q: tsutil.MustQuery(`(new_expression constructor: (identifier) @name) @expr`, l)},
 	}
 }
 
@@ -119,6 +123,7 @@ func tsOnlyRules(l *sitter.Language) []core.Rule {
 	return []core.Rule{
 		tsNoExplicitAny{q: tsutil.MustQuery(`(predefined_type) @t`, l)},
 		tsNonNullAssertion{q: tsutil.MustQuery(`(non_null_expression) @expr`, l)},
+		tsNoNamespace{q: tsutil.MustQuery(`(internal_module) @ns`, l)},
 	}
 }
 
@@ -363,6 +368,112 @@ func (r tsNonNullAssertion) Check(ctx *core.RunContext) {
 			RuleID:   r.ID(),
 			Severity: r.DefaultSeverity(),
 			Message:  "non-null assertion (!) bypasses null safety; add a proper null check instead",
+			Range:    tsutil.NodeRange(cap.Node, ctx.File.Bytes, ctx.File.Path),
+		})
+	}
+}
+
+// --- rule: js/no-eval ---
+
+type jsNoEval struct{ q tsutil.CompiledQuery }
+
+func (r jsNoEval) ID() string                    { return "js/no-eval" }
+func (r jsNoEval) Description() string           { return "eval() call is a security risk" }
+func (r jsNoEval) DefaultSeverity() core.Severity { return core.Error }
+
+func (r jsNoEval) Check(ctx *core.RunContext) {
+	seen := map[uint32]bool{}
+	for cap := range r.q.Run(ctx.Tree, ctx.File.Bytes) {
+		if cap.Name != "call" || seen[cap.Node.StartByte()] {
+			continue
+		}
+		fn := cap.Node.ChildByFieldName("function")
+		if fn != nil && nodeText(fn, ctx.File.Bytes) == "eval" {
+			seen[cap.Node.StartByte()] = true
+			ctx.Report(core.Diagnostic{
+				RuleID:   r.ID(),
+				Severity: r.DefaultSeverity(),
+				Message:  "eval() executes arbitrary code; use JSON.parse() or a safer alternative",
+				Range:    tsutil.NodeRange(cap.Node, ctx.File.Bytes, ctx.File.Path),
+			})
+		}
+	}
+}
+
+// --- rule: js/no-alert ---
+
+type jsNoAlert struct{ q tsutil.CompiledQuery }
+
+func (r jsNoAlert) ID() string                    { return "js/no-alert" }
+func (r jsNoAlert) Description() string           { return "alert/confirm/prompt left in code" }
+func (r jsNoAlert) DefaultSeverity() core.Severity { return core.Warning }
+
+var alertFns = map[string]bool{"alert": true, "confirm": true, "prompt": true}
+
+func (r jsNoAlert) Check(ctx *core.RunContext) {
+	seen := map[uint32]bool{}
+	for cap := range r.q.Run(ctx.Tree, ctx.File.Bytes) {
+		if cap.Name != "call" || seen[cap.Node.StartByte()] {
+			continue
+		}
+		fn := cap.Node.ChildByFieldName("function")
+		if fn != nil && alertFns[nodeText(fn, ctx.File.Bytes)] {
+			seen[cap.Node.StartByte()] = true
+			ctx.Report(core.Diagnostic{
+				RuleID:   r.ID(),
+				Severity: r.DefaultSeverity(),
+				Message:  nodeText(fn, ctx.File.Bytes) + "() is a browser blocking call; remove before shipping",
+				Range:    tsutil.NodeRange(cap.Node, ctx.File.Bytes, ctx.File.Path),
+			})
+		}
+	}
+}
+
+// --- rule: js/no-new-wrapper ---
+
+type jsNoNewWrapper struct{ q tsutil.CompiledQuery }
+
+func (r jsNoNewWrapper) ID() string                    { return "js/no-new-wrapper" }
+func (r jsNoNewWrapper) Description() string           { return "new Boolean/Number/String wrapper object" }
+func (r jsNoNewWrapper) DefaultSeverity() core.Severity { return core.Warning }
+
+var wrapperConstructors = map[string]bool{
+	"Boolean": true, "Number": true, "String": true, "Symbol": true, "BigInt": true,
+}
+
+func (r jsNoNewWrapper) Check(ctx *core.RunContext) {
+	seen := map[uint32]bool{}
+	for cap := range r.q.Run(ctx.Tree, ctx.File.Bytes) {
+		if cap.Name != "expr" || seen[cap.Node.StartByte()] {
+			continue
+		}
+		ctor := cap.Node.ChildByFieldName("constructor")
+		if ctor != nil && wrapperConstructors[nodeText(ctor, ctx.File.Bytes)] {
+			seen[cap.Node.StartByte()] = true
+			ctx.Report(core.Diagnostic{
+				RuleID:   r.ID(),
+				Severity: r.DefaultSeverity(),
+				Message:  fmt.Sprintf("new %s() creates an object wrapper; use the primitive literal instead", nodeText(ctor, ctx.File.Bytes)),
+				Range:    tsutil.NodeRange(cap.Node, ctx.File.Bytes, ctx.File.Path),
+			})
+		}
+	}
+}
+
+// --- rule: ts/no-namespace ---
+
+type tsNoNamespace struct{ q tsutil.CompiledQuery }
+
+func (r tsNoNamespace) ID() string                    { return "ts/no-namespace" }
+func (r tsNoNamespace) Description() string           { return "TypeScript namespace/module declaration" }
+func (r tsNoNamespace) DefaultSeverity() core.Severity { return core.Warning }
+
+func (r tsNoNamespace) Check(ctx *core.RunContext) {
+	for cap := range r.q.Run(ctx.Tree, ctx.File.Bytes) {
+		ctx.Report(core.Diagnostic{
+			RuleID:   r.ID(),
+			Severity: r.DefaultSeverity(),
+			Message:  "namespace/module declarations are discouraged; use ES modules (import/export) instead",
 			Range:    tsutil.NodeRange(cap.Node, ctx.File.Bytes, ctx.File.Path),
 		})
 	}

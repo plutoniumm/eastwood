@@ -45,6 +45,8 @@ func (Analyzer) Rules() []core.Rule {
 		goBuildTagOld{},
 		goPrint{},
 		goOsExit{},
+		goLogFatal{},
+		goContextInStruct{},
 	}
 }
 
@@ -75,6 +77,13 @@ var (
   function: (selector_expression
     operand: (identifier) @pkg
     field: (field_identifier) @fn)) @call
+`, lang)
+
+	contextStructQ = tsutil.MustQuery(`
+(field_declaration
+  type: (qualified_type
+    package: (package_identifier) @pkg
+    name: (type_identifier) @name)) @field
 `, lang)
 )
 
@@ -370,6 +379,75 @@ func (r goOsExit) Check(ctx *core.RunContext) {
 				Message:  "os.Exit skips all deferred calls; only use in main() or TestMain()",
 				Range:    tsutil.NodeRange(cap.Node, ctx.File.Bytes, ctx.File.Path),
 			})
+		}
+	}
+}
+
+// --- rule: go/log-fatal ---
+
+type goLogFatal struct{}
+
+func (goLogFatal) ID() string                    { return "go/log-fatal" }
+func (goLogFatal) Description() string           { return "log.Fatal/Fatalf/Fatalln skips deferred functions" }
+func (goLogFatal) DefaultSeverity() core.Severity { return core.Warning }
+
+var logFatalMethods = map[string]bool{"Fatal": true, "Fatalf": true, "Fatalln": true}
+
+func (r goLogFatal) Check(ctx *core.RunContext) {
+	seen := map[uint32]bool{}
+	for cap := range selectorCallQ.Run(ctx.Tree, ctx.File.Bytes) {
+		if cap.Name != "call" || seen[cap.Node.StartByte()] {
+			continue
+		}
+		fn := cap.Node.ChildByFieldName("function")
+		if fn == nil {
+			continue
+		}
+		pkg, method := selectorParts(fn, ctx.File.Bytes)
+		if pkg == "log" && logFatalMethods[method] {
+			seen[cap.Node.StartByte()] = true
+			ctx.Report(core.Diagnostic{
+				RuleID:   r.ID(),
+				Severity: r.DefaultSeverity(),
+				Message:  fmt.Sprintf("log.%s skips all deferred calls; use log.Print+return or a fatal error handler", method),
+				Range:    tsutil.NodeRange(cap.Node, ctx.File.Bytes, ctx.File.Path),
+			})
+		}
+	}
+}
+
+// --- rule: go/context-in-struct ---
+
+type goContextInStruct struct{}
+
+func (goContextInStruct) ID() string                    { return "go/context-in-struct" }
+func (goContextInStruct) Description() string           { return "context.Context stored as a struct field" }
+func (goContextInStruct) DefaultSeverity() core.Severity { return core.Warning }
+
+func (r goContextInStruct) Check(ctx *core.RunContext) {
+	for cap := range contextStructQ.Run(ctx.Tree, ctx.File.Bytes) {
+		switch cap.Name {
+		case "pkg":
+			// handled together with "name" on the @field capture
+		case "field":
+			pkg := cap.Node.ChildByFieldName("type")
+			if pkg == nil {
+				continue
+			}
+			pkgNode := pkg.ChildByFieldName("package")
+			nameNode := pkg.ChildByFieldName("name")
+			if pkgNode == nil || nameNode == nil {
+				continue
+			}
+			if nodeText(pkgNode, ctx.File.Bytes) == "context" &&
+				nodeText(nameNode, ctx.File.Bytes) == "Context" {
+				ctx.Report(core.Diagnostic{
+					RuleID:   r.ID(),
+					Severity: r.DefaultSeverity(),
+					Message:  "context.Context should not be stored in a struct; pass it as a function parameter instead",
+					Range:    tsutil.NodeRange(cap.Node, ctx.File.Bytes, ctx.File.Path),
+				})
+			}
 		}
 	}
 }

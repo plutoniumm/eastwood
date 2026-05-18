@@ -60,33 +60,43 @@ const resetColor = "\033[0m"
 const dimColor = "\033[2m"
 
 func (f *textFormatter) WriteDiagnostics(diags []core.Diagnostic) {
+	if len(diags) == 0 {
+		return
+	}
+	path := diags[0].Range.Start.File
+	if f.color {
+		fmt.Fprintf(f.w, "\033[1m%s\033[0m\n", path)
+	} else {
+		fmt.Fprintf(f.w, "%s\n", path)
+	}
 	for _, d := range diags {
 		f.writeDiag(d)
 	}
+	fmt.Fprintln(f.w)
 }
 
 func (f *textFormatter) writeDiag(d core.Diagnostic) {
-	loc := fmt.Sprintf("%s:%d:%d", d.Range.Start.File, d.Range.Start.Line, d.Range.Start.Col)
+	loc := fmt.Sprintf("%d:%d", d.Range.Start.Line, d.Range.Start.Col)
 	sev := d.Severity.String()
-	ruleID := "[" + d.RuleID + "]"
+	ruleID := d.RuleID
 
 	if f.color {
-		col, ok := severityColor[d.Severity]
-		if !ok {
-			col = ""
-		}
-		sev = col + sev + resetColor
-		ruleID = dimColor + ruleID + resetColor
+		col := severityColor[d.Severity]
+		fmt.Fprintf(f.w, "  %-9s %s%-7s%s  %s  %s%s%s\n",
+			loc,
+			col, sev, resetColor,
+			d.Message,
+			dimColor, ruleID, resetColor)
+	} else {
+		fmt.Fprintf(f.w, "  %-9s %-7s  %s  %s\n", loc, sev, d.Message, ruleID)
 	}
-
-	fmt.Fprintf(f.w, "%s: %s: %s %s\n", loc, sev, d.Message, ruleID)
 }
 
 func (f *textFormatter) WriteError(file, msg string) {
 	if f.color {
-		fmt.Fprintf(f.w, "%s: \033[31;1merror\033[0m: %s\n", file, msg)
+		fmt.Fprintf(f.w, "\033[1m%s\033[0m\n  \033[31;1merror\033[0m: %s\n\n", file, msg)
 	} else {
-		fmt.Fprintf(f.w, "%s: error: %s\n", file, msg)
+		fmt.Fprintf(f.w, "%s\n  error: %s\n\n", file, msg)
 	}
 }
 
