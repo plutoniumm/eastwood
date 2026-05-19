@@ -1,28 +1,28 @@
 class Eastwood < Formula
   desc "Fast, pluggable source code linter"
   homepage "https://github.com/plutoniumm/eastwood"
-  version "0.2.1"
+  version "0.2.2"
   license "MIT"
 
   on_macos do
     on_arm do
       url "https://github.com/plutoniumm/eastwood/releases/download/v#{version}/eastwood_darwin_arm64.tar.gz"
-      sha256 "6614348f25b4433b7f8c85826ed3c224e90c7899628fe5aa2160eb151478e098"
+      sha256 "0dbf17ee022b07f91a01d6db16d6262cfc2315a628c140d84425379034491c17"
     end
     on_intel do
       url "https://github.com/plutoniumm/eastwood/releases/download/v#{version}/eastwood_darwin_amd64.tar.gz"
-      sha256 "62797342cb7928ed259230cb97ef9b3a054b59e38362767e4ce963cd6bf8e4fb"
+      sha256 "4ef360ead4d78c765443b6a302194eeb3998f90856c7d9c48b5582c05bd9b5c4"
     end
   end
 
   on_linux do
     on_arm do
       url "https://github.com/plutoniumm/eastwood/releases/download/v#{version}/eastwood_linux_arm64.tar.gz"
-      sha256 "03e91b385e3a65f842fdf17469a9deaa56dcc641245f955074c6e4c3d9ef60f3"
+      sha256 "7e23efea1d685a60006dbd9cbfbb56b262c1fc0c3547e46441b63503f42f8dbe"
     end
     on_intel do
       url "https://github.com/plutoniumm/eastwood/releases/download/v#{version}/eastwood_linux_amd64.tar.gz"
-      sha256 "45b4a139f962217b73dcf45588f3c2e665aab3ec4d5006ee05a80dfc1caf564e"
+      sha256 "581d1f7ee56cd8241dbba6376015d2f0efdc11a0b41ddc4b2a411eeec2a38a48"
     end
   end
 
