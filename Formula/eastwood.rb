@@ -1,7 +1,7 @@
 class Eastwood < Formula
   desc "Fast, pluggable source code linter"
   homepage "https://github.com/plutoniumm/eastwood"
-  version "0.2.0"
+  version "0.2.1"
   license "MIT"
 
   on_macos do
