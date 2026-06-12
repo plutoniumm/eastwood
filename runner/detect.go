@@ -1,42 +1,12 @@
-// Package detect infers the language of a source file from its extension or content.
-package detect
+// Language detection for stdin input, by content scoring.
 
-import (
-	"bytes"
-	"path/filepath"
-	"strings"
-)
+package runner
 
-var extMap = map[string]string{
-	".py":     "python",
-	".pyi":    "python",
-	".tex":    "latex",
-	".cls":    "latex",
-	".sty":    "latex",
-	".bib":    "latex",
-	".go":     "go",
-	".rs":     "rust",
-	".js":     "javascript",
-	".jsx":    "javascript",
-	".mjs":    "javascript",
-	".cjs":    "javascript",
-	".ts":     "typescript",
-	".tsx":    "typescript",
-	".mts":    "typescript",
-	".cts":    "typescript",
-	".svelte": "svelte",
-}
+import "bytes"
 
-// FromPath returns the language for the given file path based on extension.
-func FromPath(path string) (string, bool) {
-	ext := strings.ToLower(filepath.Ext(path))
-	lang, ok := extMap[ext]
-	return lang, ok
-}
-
-// FromContent attempts to infer the language from file content.
+// DetectLanguage attempts to infer the language from file content.
 // Returns ("", false) when no confident match is found.
-func FromContent(src []byte) (lang string, confident bool) {
+func DetectLanguage(src []byte) (lang string, confident bool) {
 	head := src
 	if len(head) > 4096 {
 		head = head[:4096]

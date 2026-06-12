@@ -1,5 +1,6 @@
-// Package output formats and writes diagnostics to stdout.
-package output
+// Output formatting: text (human) and NDJSON writers.
+
+package runner
 
 import (
 	"encoding/json"
@@ -34,9 +35,9 @@ type Formatter interface {
 	WriteError(file, msg string)
 }
 
-// New returns a Formatter for the given format. Color is enabled when f is
+// newFormatter returns a Formatter for the given format. Color is enabled when f is
 // text and stdout is an interactive terminal.
-func New(f Format, w io.Writer) Formatter {
+func newFormatter(f Format, w io.Writer) Formatter {
 	if f == FormatJSON {
 		return &jsonFormatter{w: w}
 	}
@@ -51,9 +52,9 @@ type textFormatter struct {
 }
 
 var severityColor = map[core.Severity]string{
-	core.Info:    "\033[36m",    // cyan
-	core.Warning: "\033[33m",    // yellow
-	core.Error:   "\033[31;1m",  // bold red
+	core.Info:    "\033[36m",   // cyan
+	core.Warning: "\033[33m",   // yellow
+	core.Error:   "\033[31;1m", // bold red
 }
 
 const resetColor = "\033[0m"
@@ -133,7 +134,7 @@ func (f *jsonFormatter) WriteDiagnostics(diags []core.Diagnostic) {
 
 func (f *jsonFormatter) WriteError(file, msg string) {
 	obj := jsonDiag{
-		RuleID:   "le/internal-error",
+		RuleID:   "eastwood/internal-error",
 		Severity: "error",
 		File:     file,
 		Message:  msg,

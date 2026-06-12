@@ -6,7 +6,10 @@ dist/
 amos/
 
 # svelte grammar C sources (downloaded by make setup-svelte)
-svelte/grammar/src/
+language/svelte/grammar/src/
 
 # macOS
 .DS_Store
+.vscode/
+.claude/
+CLAUDE.md

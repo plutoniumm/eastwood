@@ -37,7 +37,7 @@ EASTWOOD_INSTALL_DIR="$HOME/.local/bin" \
 ### From source
 
 ```sh
-go install github.com/plutoniumm/eastwood/cmd/eastwood@latest
+go install github.com/plutoniumm/eastwood@latest
 ```
 
 Requires Go 1.25+ and a C toolchain (Xcode CLT on macOS). CGo is on for tree-sitter.

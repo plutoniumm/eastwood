@@ -33,21 +33,6 @@ func (Analyzer) CommentRanges(_ []byte, tree *sitter.Tree) []core.ByteRange {
 	return tsutil.CommentRangesFromTree(tree, "line_comment", "block_comment")
 }
 
-func (Analyzer) Rules() []core.Rule {
-	return []core.Rule{
-		rsUnwrap{},
-		rsExpect{},
-		rsPanic{},
-		rsTodo{},
-		rsUnimplemented{},
-		rsDbg{},
-		rsUnsafeBlock{},
-		rsAllowAttribute{},
-		rsClone{},
-		rsPrint{},
-	}
-}
-
 var (
 	lang = sitterrust.GetLanguage()
 	pool = tsutil.NewParserPool(lang)
@@ -69,246 +54,100 @@ var (
 `, lang)
 )
 
-func nodeText(node *sitter.Node, src []byte) string {
-	return string(src[node.StartByte():node.EndByte()])
-}
-
-// --- rule: rs/unwrap ---
-
-type rsUnwrap struct{}
-
-func (rsUnwrap) ID() string                    { return "rs/unwrap" }
-func (rsUnwrap) Description() string           { return ".unwrap() call; propagate errors with ? instead" }
-func (rsUnwrap) DefaultSeverity() core.Severity { return core.Warning }
-
-func (r rsUnwrap) Check(ctx *core.RunContext) {
-	for cap := range methodCallQ.Run(ctx.Tree, ctx.File.Bytes) {
-		if cap.Name == "method" && nodeText(cap.Node, ctx.File.Bytes) == "unwrap" {
-			ctx.Report(core.Diagnostic{
-				RuleID:   r.ID(),
-				Severity: r.DefaultSeverity(),
-				Message:  ".unwrap() panics on Err/None; propagate with ? or handle explicitly",
-				Range:    tsutil.NodeRange(cap.Node, ctx.File.Bytes, ctx.File.Path),
-			})
-		}
-	}
-}
-
-// --- rule: rs/expect ---
-
-type rsExpect struct{}
-
-func (rsExpect) ID() string                    { return "rs/expect" }
-func (rsExpect) Description() string           { return ".expect() call; propagate errors with ? instead" }
-func (rsExpect) DefaultSeverity() core.Severity { return core.Warning }
-
-func (r rsExpect) Check(ctx *core.RunContext) {
-	for cap := range methodCallQ.Run(ctx.Tree, ctx.File.Bytes) {
-		if cap.Name == "method" && nodeText(cap.Node, ctx.File.Bytes) == "expect" {
-			ctx.Report(core.Diagnostic{
-				RuleID:   r.ID(),
-				Severity: r.DefaultSeverity(),
-				Message:  ".expect() panics on Err/None; propagate with ? or handle explicitly",
-				Range:    tsutil.NodeRange(cap.Node, ctx.File.Bytes, ctx.File.Path),
-			})
-		}
-	}
-}
-
-// --- rule: rs/panic ---
-
-type rsPanic struct{}
-
-func (rsPanic) ID() string                    { return "rs/panic" }
-func (rsPanic) Description() string           { return "panic!() macro" }
-func (rsPanic) DefaultSeverity() core.Severity { return core.Warning }
-
-func (r rsPanic) Check(ctx *core.RunContext) {
-	for cap := range macroQ.Run(ctx.Tree, ctx.File.Bytes) {
-		if cap.Name == "name" && nodeText(cap.Node, ctx.File.Bytes) == "panic" {
-			ctx.Report(core.Diagnostic{
-				RuleID:   r.ID(),
-				Severity: r.DefaultSeverity(),
-				Message:  "panic!() in production code; return a Result instead",
-				Range:    tsutil.NodeRange(cap.Node, ctx.File.Bytes, ctx.File.Path),
-			})
-		}
-	}
-}
-
-// --- rule: rs/todo ---
-
-type rsTodo struct{}
-
-func (rsTodo) ID() string                    { return "rs/todo" }
-func (rsTodo) Description() string           { return "todo!() macro left in code" }
-func (rsTodo) DefaultSeverity() core.Severity { return core.Warning }
-
-func (r rsTodo) Check(ctx *core.RunContext) {
-	for cap := range macroQ.Run(ctx.Tree, ctx.File.Bytes) {
-		if cap.Name == "name" && nodeText(cap.Node, ctx.File.Bytes) == "todo" {
-			ctx.Report(core.Diagnostic{
-				RuleID:   r.ID(),
-				Severity: r.DefaultSeverity(),
-				Message:  "todo!() left in code; implement or track in issue tracker",
-				Range:    tsutil.NodeRange(cap.Node, ctx.File.Bytes, ctx.File.Path),
-			})
-		}
-	}
-}
-
-// --- rule: rs/unimplemented ---
-
-type rsUnimplemented struct{}
-
-func (rsUnimplemented) ID() string                    { return "rs/unimplemented" }
-func (rsUnimplemented) Description() string           { return "unimplemented!() macro" }
-func (rsUnimplemented) DefaultSeverity() core.Severity { return core.Warning }
-
-func (r rsUnimplemented) Check(ctx *core.RunContext) {
-	for cap := range macroQ.Run(ctx.Tree, ctx.File.Bytes) {
-		if cap.Name == "name" && nodeText(cap.Node, ctx.File.Bytes) == "unimplemented" {
-			ctx.Report(core.Diagnostic{
-				RuleID:   r.ID(),
-				Severity: r.DefaultSeverity(),
-				Message:  "unimplemented!() will panic at runtime",
-				Range:    tsutil.NodeRange(cap.Node, ctx.File.Bytes, ctx.File.Path),
-			})
-		}
-	}
-}
-
-// --- rule: rs/dbg ---
-
-type rsDbg struct{}
-
-func (rsDbg) ID() string                    { return "rs/dbg" }
-func (rsDbg) Description() string           { return "dbg!() macro left in code" }
-func (rsDbg) DefaultSeverity() core.Severity { return core.Warning }
-
-func (r rsDbg) Check(ctx *core.RunContext) {
-	for cap := range macroQ.Run(ctx.Tree, ctx.File.Bytes) {
-		if cap.Name == "name" && nodeText(cap.Node, ctx.File.Bytes) == "dbg" {
-			ctx.Report(core.Diagnostic{
-				RuleID:   r.ID(),
-				Severity: r.DefaultSeverity(),
-				Message:  "dbg!() debug macro left in code; remove before shipping",
-				Range:    tsutil.NodeRange(cap.Node, ctx.File.Bytes, ctx.File.Path),
-			})
-		}
-	}
-}
-
-// --- rule: rs/unsafe-block ---
-
-type rsUnsafeBlock struct{}
-
-func (rsUnsafeBlock) ID() string                    { return "rs/unsafe-block" }
-func (rsUnsafeBlock) Description() string           { return "unsafe block requires manual safety audit" }
-func (rsUnsafeBlock) DefaultSeverity() core.Severity { return core.Warning }
-
-func (r rsUnsafeBlock) Check(ctx *core.RunContext) {
-	for cap := range unsafeQ.Run(ctx.Tree, ctx.File.Bytes) {
-		ctx.Report(core.Diagnostic{
-			RuleID:   r.ID(),
-			Severity: r.DefaultSeverity(),
-			Message:  "unsafe block; ensure invariants are documented with a SAFETY comment",
-			Range:    tsutil.NodeRange(cap.Node, ctx.File.Bytes, ctx.File.Path),
-		})
-	}
-}
-
-// --- rule: rs/allow-attribute ---
-
-type rsAllowAttribute struct{}
-
-func (rsAllowAttribute) ID() string                    { return "rs/allow-attribute" }
-func (rsAllowAttribute) Description() string           { return "#[allow(...)] suppresses compiler warnings" }
-func (rsAllowAttribute) DefaultSeverity() core.Severity { return core.Info }
-
-func (r rsAllowAttribute) Check(ctx *core.RunContext) {
-	cfg := ctx.RuleConfig(r.ID())
-	flagged := cfg.Strings("flag")
-	if len(flagged) == 0 {
-		flagged = []string{"unused", "dead_code", "unused_variables", "unused_imports"}
-	}
-	flagSet := make(map[string]bool, len(flagged))
-	for _, f := range flagged {
-		flagSet[f] = true
-	}
-
-	seen := map[uint32]bool{}
-	for cap := range attrQ.Run(ctx.Tree, ctx.File.Bytes) {
-		if cap.Name != "attr" || seen[cap.Node.StartByte()] {
-			continue
-		}
-		attr := cap.Node.NamedChild(0)
-		if attr == nil || attr.NamedChildCount() == 0 {
-			continue
-		}
-		nameNode := attr.NamedChild(0)
-		if nameNode == nil || nodeText(nameNode, ctx.File.Bytes) != "allow" {
-			continue
-		}
-		if attr.NamedChildCount() < 2 {
-			continue
-		}
-		for i := 1; i < int(attr.NamedChildCount()); i++ {
-			lint := strings.TrimSpace(nodeText(attr.NamedChild(i), ctx.File.Bytes))
-			if flagSet[lint] {
-				seen[cap.Node.StartByte()] = true
-				ctx.Report(core.Diagnostic{
-					RuleID:   r.ID(),
-					Severity: r.DefaultSeverity(),
-					Message:  fmt.Sprintf("#[allow(%s)] suppresses a compiler warning; fix the underlying issue", lint),
-					Range:    tsutil.NodeRange(cap.Node, ctx.File.Bytes, ctx.File.Path),
-				})
-				break
+// methodRule flags .method() calls by name.
+func methodRule(id, desc string, sev core.Severity, method, msg string) core.Rule {
+	return core.NewRule(id, desc, sev, func(r core.Rule, ctx *core.RunContext) {
+		for cap := range methodCallQ.Run(ctx.Tree, ctx.File.Bytes) {
+			if cap.Name == "method" && tsutil.NodeText(cap.Node, ctx.File.Bytes) == method {
+				tsutil.ReportNode(ctx, r, cap.Node, msg)
 			}
 		}
-	}
+	})
 }
 
-// --- rule: rs/clone ---
-
-type rsClone struct{}
-
-func (rsClone) ID() string                    { return "rs/clone" }
-func (rsClone) Description() string           { return ".clone() call; verify it is necessary" }
-func (rsClone) DefaultSeverity() core.Severity { return core.Info }
-
-func (r rsClone) Check(ctx *core.RunContext) {
-	for cap := range methodCallQ.Run(ctx.Tree, ctx.File.Bytes) {
-		if cap.Name == "method" && nodeText(cap.Node, ctx.File.Bytes) == "clone" {
-			ctx.Report(core.Diagnostic{
-				RuleID:   r.ID(),
-				Severity: r.DefaultSeverity(),
-				Message:  ".clone() may be unnecessary; consider borrowing or using Arc<T>",
-				Range:    tsutil.NodeRange(cap.Node, ctx.File.Bytes, ctx.File.Path),
-			})
+// macroRule flags name!() macro invocations by name.
+func macroRule(id, desc string, sev core.Severity, name, msg string) core.Rule {
+	return core.NewRule(id, desc, sev, func(r core.Rule, ctx *core.RunContext) {
+		for cap := range macroQ.Run(ctx.Tree, ctx.File.Bytes) {
+			if cap.Name == "name" && tsutil.NodeText(cap.Node, ctx.File.Bytes) == name {
+				tsutil.ReportNode(ctx, r, cap.Node, msg)
+			}
 		}
-	}
+	})
 }
-
-// --- rule: rs/print ---
-
-type rsPrint struct{}
-
-func (rsPrint) ID() string                    { return "rs/print" }
-func (rsPrint) Description() string           { return "println!/print!/eprintln! macro left in code" }
-func (rsPrint) DefaultSeverity() core.Severity { return core.Info }
 
 var printMacros = map[string]bool{"println": true, "print": true, "eprintln": true, "eprint": true}
 
-func (r rsPrint) Check(ctx *core.RunContext) {
-	for cap := range macroQ.Run(ctx.Tree, ctx.File.Bytes) {
-		if cap.Name == "name" && printMacros[nodeText(cap.Node, ctx.File.Bytes)] {
-			ctx.Report(core.Diagnostic{
-				RuleID:   r.ID(),
-				Severity: r.DefaultSeverity(),
-				Message:  nodeText(cap.Node, ctx.File.Bytes) + "!() left in code; use a structured logger",
-				Range:    tsutil.NodeRange(cap.Node, ctx.File.Bytes, ctx.File.Path),
-			})
-		}
+func (Analyzer) Rules() []core.Rule {
+	return []core.Rule{
+		methodRule("rs/unwrap", ".unwrap() call; propagate errors with ? instead", core.Warning,
+			"unwrap", ".unwrap() panics on Err/None; propagate with ? or handle explicitly"),
+		methodRule("rs/expect", ".expect() call; propagate errors with ? instead", core.Warning,
+			"expect", ".expect() panics on Err/None; propagate with ? or handle explicitly"),
+		macroRule("rs/panic", "panic!() macro", core.Warning,
+			"panic", "panic!() in production code; return a Result instead"),
+		macroRule("rs/todo", "todo!() macro left in code", core.Warning,
+			"todo", "todo!() left in code; implement or track in issue tracker"),
+		macroRule("rs/unimplemented", "unimplemented!() macro", core.Warning,
+			"unimplemented", "unimplemented!() will panic at runtime"),
+		macroRule("rs/dbg", "dbg!() macro left in code", core.Warning,
+			"dbg", "dbg!() debug macro left in code; remove before shipping"),
+
+		core.NewRule("rs/unsafe-block", "unsafe block requires manual safety audit", core.Warning,
+			func(r core.Rule, ctx *core.RunContext) {
+				for cap := range unsafeQ.Run(ctx.Tree, ctx.File.Bytes) {
+					tsutil.ReportNode(ctx, r, cap.Node, "unsafe block; ensure invariants are documented with a SAFETY comment")
+				}
+			}),
+
+		core.NewRule("rs/allow-attribute", "#[allow(...)] suppresses compiler warnings", core.Info,
+			func(r core.Rule, ctx *core.RunContext) {
+				flagged := ctx.RuleConfig(r.ID()).Strings("flag")
+				if len(flagged) == 0 {
+					flagged = []string{"unused", "dead_code", "unused_variables", "unused_imports"}
+				}
+				flagSet := make(map[string]bool, len(flagged))
+				for _, f := range flagged {
+					flagSet[f] = true
+				}
+				src := ctx.File.Bytes
+				// One attribute_item can match once per identifier inside it.
+				seen := map[uint32]bool{}
+				for m := range attrQ.Matches(ctx.Tree, src) {
+					if start := m.Node("attr").StartByte(); seen[start] {
+						continue
+					} else {
+						seen[start] = true
+					}
+					attr := m.Node("attr").NamedChild(0)
+					if attr == nil || attr.NamedChildCount() < 2 {
+						continue
+					}
+					if tsutil.NodeText(attr.NamedChild(0), src) != "allow" {
+						continue
+					}
+					for i := 1; i < int(attr.NamedChildCount()); i++ {
+						lint := strings.TrimSpace(tsutil.NodeText(attr.NamedChild(i), src))
+						if flagSet[lint] {
+							tsutil.ReportNode(ctx, r, m.Node("attr"),
+								fmt.Sprintf("#[allow(%s)] suppresses a compiler warning; fix the underlying issue", lint))
+							break
+						}
+					}
+				}
+			}),
+
+		methodRule("rs/clone", ".clone() call; verify it is necessary", core.Info,
+			"clone", ".clone() may be unnecessary; consider borrowing or using Arc<T>"),
+
+		core.NewRule("rs/print", "println!/print!/eprintln! macro left in code", core.Info,
+			func(r core.Rule, ctx *core.RunContext) {
+				for cap := range macroQ.Run(ctx.Tree, ctx.File.Bytes) {
+					if cap.Name == "name" && printMacros[tsutil.NodeText(cap.Node, ctx.File.Bytes)] {
+						tsutil.ReportNode(ctx, r, cap.Node,
+							tsutil.NodeText(cap.Node, ctx.File.Bytes)+"!() left in code; use a structured logger")
+					}
+				}
+			}),
 	}
 }

@@ -39,6 +39,8 @@ func (Analyzer) Rules() []core.Rule {
 		emptySection{},
 		wideHyphenInRange{},
 		inconsistentMathDelim{},
+		texUnmatchedBrace{},
+		texUncitedLabel{},
 	}
 }
 
@@ -69,56 +71,21 @@ func latexCommentRanges(src []byte) []core.ByteRange {
 
 // --- shared text-rule helpers ---
 
-// lineInfo caches per-line metadata for a source file.
-type lineInfo struct {
-	starts []int // byte offset of the start of each line (0-indexed)
-}
-
-func buildLineInfo(src []byte) lineInfo {
-	starts := []int{0}
-	for i, b := range src {
-		if b == '\n' {
-			starts = append(starts, i+1)
-		}
-	}
-	return lineInfo{starts: starts}
-}
-
-// positionAt converts a byte offset to a core.Position.
-func (li lineInfo) positionAt(offset int, file string) core.Position {
-	line := sort.Search(len(li.starts), func(i int) bool {
-		return li.starts[i] > offset
-	}) - 1
-	if line < 0 {
-		line = 0
-	}
-	col := offset - li.starts[line] + 1
-	return core.Position{File: file, Line: line + 1, Col: col, Offset: offset}
-}
-
 // inComment reports whether offset falls within any of the given comment ranges.
 func inComment(offset int, comments []core.ByteRange) bool {
-	for _, r := range comments {
-		if r.Contains(offset) {
-			return true
-		}
-	}
-	return false
+	return core.InAnyRange(offset, comments)
 }
 
-// textRule is a helper that provides shared state to text-based LaTeX rules.
-type textRule struct{}
-
-// reportAt emits a diagnostic at a specific byte offset.
+// reportAt emits a diagnostic at a specific byte offset. Positions come from
+// the RunContext's shared per-file line index.
 func reportAt(ctx *core.RunContext, ruleID, msg string, sev core.Severity, offset, endOffset int) {
-	li := buildLineInfo(ctx.File.Bytes)
 	ctx.Report(core.Diagnostic{
 		RuleID:   ruleID,
 		Severity: sev,
 		Message:  msg,
 		Range: core.Range{
-			Start: li.positionAt(offset, ctx.File.Path),
-			End:   li.positionAt(endOffset, ctx.File.Path),
+			Start: ctx.PositionAt(offset),
+			End:   ctx.PositionAt(endOffset),
 		},
 	})
 }
@@ -126,13 +93,7 @@ func reportAt(ctx *core.RunContext, ruleID, msg string, sev core.Severity, offse
 // findAll returns all non-overlapping match byte ranges for re in src,
 // skipping matches that fall within any comment range.
 func findAll(re *regexp.Regexp, src []byte, comments []core.ByteRange) [][]int {
-	var out [][]int
-	for _, loc := range re.FindAllIndex(src, -1) {
-		if !inComment(loc[0], comments) {
-			out = append(out, loc)
-		}
-	}
-	return out
+	return core.FindAll(re, src, comments)
 }
 
 // --- rule: tex/double-dollar-display-math ---
@@ -141,8 +102,8 @@ type doubleDollarMath struct{}
 
 var doubleDollarRe = regexp.MustCompile(`\$\$`)
 
-func (doubleDollarMath) ID() string               { return "tex/double-dollar-display-math" }
-func (doubleDollarMath) Description() string      { return "use \\[...\\] instead of $$...$$" }
+func (doubleDollarMath) ID() string                     { return "tex/double-dollar-display-math" }
+func (doubleDollarMath) Description() string            { return "use \\[...\\] instead of $$...$$" }
 func (doubleDollarMath) DefaultSeverity() core.Severity { return core.Warning }
 
 func (r doubleDollarMath) Check(ctx *core.RunContext) {
@@ -167,8 +128,8 @@ type missingNbspCite struct{}
 // Matches: a letter, then a space (not ~), then \cite
 var nbspCiteRe = regexp.MustCompile(`[a-zA-Z] \\cite\b`)
 
-func (missingNbspCite) ID() string               { return "tex/missing-nbsp-before-cite" }
-func (missingNbspCite) Description() string      { return "missing non-breaking space before \\cite" }
+func (missingNbspCite) ID() string                     { return "tex/missing-nbsp-before-cite" }
+func (missingNbspCite) Description() string            { return "missing non-breaking space before \\cite" }
 func (missingNbspCite) DefaultSeverity() core.Severity { return core.Warning }
 
 func (r missingNbspCite) Check(ctx *core.RunContext) {
@@ -185,15 +146,17 @@ type missingNbspFig struct{}
 // Matches: Fig., Eq., Sec., Tab., Alg., Lem., Thm., Def. followed by space/tab
 var nbspFigRe = regexp.MustCompile(`\b(Fig|Eq|Sec|Tab|Alg|Lem|Thm|Def)\.[ \t]`)
 
-func (missingNbspFig) ID() string               { return "tex/missing-nbsp-after-fig" }
-func (missingNbspFig) Description() string      { return "missing non-breaking space after abbreviated cross-reference" }
+func (missingNbspFig) ID() string { return "tex/missing-nbsp-after-fig" }
+func (missingNbspFig) Description() string {
+	return "missing non-breaking space after abbreviated cross-reference"
+}
 func (missingNbspFig) DefaultSeverity() core.Severity { return core.Warning }
 
 func (r missingNbspFig) Check(ctx *core.RunContext) {
 	for _, loc := range findAll(nbspFigRe, ctx.File.Bytes, ctx.CommentRanges) {
 		// The bad space is the last byte of the match.
 		spaceOff := loc[1] - 1
-		abbrev := string(ctx.File.Bytes[loc[0]:loc[1]-1])
+		abbrev := string(ctx.File.Bytes[loc[0] : loc[1]-1])
 		reportAt(ctx, r.ID(),
 			fmt.Sprintf("use ~ instead of a space after %s (non-breaking space prevents line break)", abbrev),
 			r.DefaultSeverity(), spaceOff, spaceOff+1)
@@ -206,8 +169,8 @@ type straightQuotes struct{}
 
 var straightQuoteRe = regexp.MustCompile(`"`)
 
-func (straightQuotes) ID() string               { return "tex/straight-quotes" }
-func (straightQuotes) Description() string      { return "straight double-quote instead of LaTeX quotes" }
+func (straightQuotes) ID() string                     { return "tex/straight-quotes" }
+func (straightQuotes) Description() string            { return "straight double-quote instead of LaTeX quotes" }
 func (straightQuotes) DefaultSeverity() core.Severity { return core.Warning }
 
 func (r straightQuotes) Check(ctx *core.RunContext) {
@@ -220,31 +183,31 @@ func (r straightQuotes) Check(ctx *core.RunContext) {
 
 type multipleBlankLines struct{}
 
-func (multipleBlankLines) ID() string               { return "tex/multiple-blank-lines" }
-func (multipleBlankLines) Description() string      { return "three or more consecutive blank lines" }
+func (multipleBlankLines) ID() string                     { return "tex/multiple-blank-lines" }
+func (multipleBlankLines) Description() string            { return "three or more consecutive blank lines" }
 func (multipleBlankLines) DefaultSeverity() core.Severity { return core.Info }
 
 func (r multipleBlankLines) Check(ctx *core.RunContext) {
 	src := ctx.File.Bytes
-	li := buildLineInfo(src)
 	lines := strings.Split(string(src), "\n")
 	consecutive := 0
-	startLine := 0
-	for i, line := range lines {
+	startOff := 0
+	off := 0
+	for _, line := range lines {
 		if strings.TrimSpace(line) == "" {
 			if consecutive == 0 {
-				startLine = i
+				startOff = off
 			}
 			consecutive++
 		} else {
 			if consecutive >= 3 {
-				off := li.starts[startLine]
 				reportAt(ctx, r.ID(),
 					fmt.Sprintf("%d consecutive blank lines; consider reducing to one", consecutive),
-					r.DefaultSeverity(), off, off+1)
+					r.DefaultSeverity(), startOff, startOff+1)
 			}
 			consecutive = 0
 		}
+		off += len(line) + 1
 	}
 }
 
@@ -255,13 +218,12 @@ type mismatchedEnvironment struct{}
 var beginEnvRe = regexp.MustCompile(`\\begin\{([^}]+)\}`)
 var endEnvRe = regexp.MustCompile(`\\end\{([^}]+)\}`)
 
-func (mismatchedEnvironment) ID() string               { return "tex/mismatched-environment" }
-func (mismatchedEnvironment) Description() string      { return "\\begin without matching \\end" }
+func (mismatchedEnvironment) ID() string                     { return "tex/mismatched-environment" }
+func (mismatchedEnvironment) Description() string            { return "\\begin without matching \\end" }
 func (mismatchedEnvironment) DefaultSeverity() core.Severity { return core.Error }
 
 func (r mismatchedEnvironment) Check(ctx *core.RunContext) {
 	src := ctx.File.Bytes
-	li := buildLineInfo(src)
 
 	type envFrame struct {
 		name   string
@@ -296,36 +258,21 @@ func (r mismatchedEnvironment) Check(ctx *core.RunContext) {
 			stack = append(stack, envFrame{name: ev.name, offset: ev.offset})
 		} else {
 			if len(stack) == 0 {
-				pos := li.positionAt(ev.offset, ctx.File.Path)
-				ctx.Report(core.Diagnostic{
-					RuleID:   r.ID(),
-					Severity: r.DefaultSeverity(),
-					Message:  fmt.Sprintf("\\end{%s} has no matching \\begin", ev.name),
-					Range:    core.Range{Start: pos, End: li.positionAt(ev.end, ctx.File.Path)},
-				})
+				reportAt(ctx, r.ID(), fmt.Sprintf("\\end{%s} has no matching \\begin", ev.name),
+					r.DefaultSeverity(), ev.offset, ev.end)
 				continue
 			}
 			top := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
 			if top.name != ev.name {
-				pos := li.positionAt(ev.offset, ctx.File.Path)
-				ctx.Report(core.Diagnostic{
-					RuleID:   r.ID(),
-					Severity: r.DefaultSeverity(),
-					Message:  fmt.Sprintf("\\end{%s} does not match \\begin{%s}", ev.name, top.name),
-					Range:    core.Range{Start: pos, End: li.positionAt(ev.end, ctx.File.Path)},
-				})
+				reportAt(ctx, r.ID(), fmt.Sprintf("\\end{%s} does not match \\begin{%s}", ev.name, top.name),
+					r.DefaultSeverity(), ev.offset, ev.end)
 			}
 		}
 	}
 	for _, frame := range stack {
-		pos := li.positionAt(frame.offset, ctx.File.Path)
-		ctx.Report(core.Diagnostic{
-			RuleID:   r.ID(),
-			Severity: r.DefaultSeverity(),
-			Message:  fmt.Sprintf("\\begin{%s} has no matching \\end", frame.name),
-			Range:    core.Range{Start: pos, End: li.positionAt(frame.offset+len(frame.name)+8, ctx.File.Path)},
-		})
+		reportAt(ctx, r.ID(), fmt.Sprintf("\\begin{%s} has no matching \\end", frame.name),
+			r.DefaultSeverity(), frame.offset, frame.offset+len(frame.name)+8)
 	}
 }
 
@@ -333,8 +280,8 @@ func (r mismatchedEnvironment) Check(ctx *core.RunContext) {
 
 type spaceBeforePunct struct{}
 
-func (spaceBeforePunct) ID() string               { return "tex/space-before-punctuation" }
-func (spaceBeforePunct) Description() string      { return "space immediately before punctuation" }
+func (spaceBeforePunct) ID() string                     { return "tex/space-before-punctuation" }
+func (spaceBeforePunct) Description() string            { return "space immediately before punctuation" }
 func (spaceBeforePunct) DefaultSeverity() core.Severity { return core.Warning }
 
 func (r spaceBeforePunct) Check(ctx *core.RunContext) {
@@ -374,13 +321,12 @@ type emptySection struct{}
 
 var sectionCmdRe = regexp.MustCompile(`\\(chapter|section|subsection|subsubsection|paragraph)\*?\{[^}]*\}`)
 
-func (emptySection) ID() string               { return "tex/empty-section" }
-func (emptySection) Description() string      { return "section with no content before the next section" }
+func (emptySection) ID() string                     { return "tex/empty-section" }
+func (emptySection) Description() string            { return "section with no content before the next section" }
 func (emptySection) DefaultSeverity() core.Severity { return core.Warning }
 
 func (r emptySection) Check(ctx *core.RunContext) {
 	src := ctx.File.Bytes
-	li := buildLineInfo(src)
 	matches := sectionCmdRe.FindAllIndex(src, -1)
 
 	for i := 0; i+1 < len(matches); i++ {
@@ -391,13 +337,8 @@ func (r emptySection) Check(ctx *core.RunContext) {
 		}
 		between := strings.TrimSpace(string(src[cur[1]:next[0]]))
 		if between == "" {
-			pos := li.positionAt(cur[0], ctx.File.Path)
-			ctx.Report(core.Diagnostic{
-				RuleID:   r.ID(),
-				Severity: r.DefaultSeverity(),
-				Message:  "section has no content before the next section heading",
-				Range:    core.Range{Start: pos, End: li.positionAt(cur[1], ctx.File.Path)},
-			})
+			reportAt(ctx, r.ID(), "section has no content before the next section heading",
+				r.DefaultSeverity(), cur[0], cur[1])
 		}
 	}
 }
@@ -410,8 +351,10 @@ type wideHyphenInRange struct{}
 var hyphenRangeRe = regexp.MustCompile(`(\d+)-(\d+)`)
 var enDashRe = regexp.MustCompile(`(\d+)--(\d+)`)
 
-func (wideHyphenInRange) ID() string               { return "tex/wide-hyphen-in-range" }
-func (wideHyphenInRange) Description() string      { return "single hyphen in numeric range; use en-dash (--)" }
+func (wideHyphenInRange) ID() string { return "tex/wide-hyphen-in-range" }
+func (wideHyphenInRange) Description() string {
+	return "single hyphen in numeric range; use en-dash (--)"
+}
 func (wideHyphenInRange) DefaultSeverity() core.Severity { return core.Info }
 
 func (r wideHyphenInRange) Check(ctx *core.RunContext) {
@@ -438,8 +381,10 @@ type inconsistentMathDelim struct{}
 var dollarInlineRe = regexp.MustCompile(`\$[^$]+?\$`)
 var parenInlineRe = regexp.MustCompile(`\\\(.*?\\\)`)
 
-func (inconsistentMathDelim) ID() string               { return "tex/inconsistent-math-delim" }
-func (inconsistentMathDelim) Description() string      { return "mixed inline math delimiters ($...$ and \\(...\\))" }
+func (inconsistentMathDelim) ID() string { return "tex/inconsistent-math-delim" }
+func (inconsistentMathDelim) Description() string {
+	return "mixed inline math delimiters ($...$ and \\(...\\))"
+}
 func (inconsistentMathDelim) DefaultSeverity() core.Severity { return core.Warning }
 
 func (r inconsistentMathDelim) Check(ctx *core.RunContext) {
@@ -470,4 +415,100 @@ func (r inconsistentMathDelim) Check(ctx *core.RunContext) {
 	reportAt(ctx, r.ID(),
 		fmt.Sprintf("file uses both %s and %s for inline math; pick one (majority is %s)", minority, majority, majority),
 		r.DefaultSeverity(), minorityOff, minorityOff+1)
+}
+
+// --- rule: tex/unmatched-brace ---
+
+type texUnmatchedBrace struct{}
+
+func (texUnmatchedBrace) ID() string                     { return "tex/unmatched-brace" }
+func (texUnmatchedBrace) Description() string            { return "unmatched { or } in document" }
+func (texUnmatchedBrace) DefaultSeverity() core.Severity { return core.Error }
+
+func (r texUnmatchedBrace) Check(ctx *core.RunContext) {
+	src := ctx.File.Bytes
+	comments := ctx.CommentRanges
+
+	var opens []int // byte offsets of unmatched {
+	cIdx := 0
+	i := 0
+
+	for i < len(src) {
+		// Advance past any comment range that covers i.
+		for cIdx < len(comments) && i >= comments[cIdx].Start {
+			if i < comments[cIdx].End {
+				i = comments[cIdx].End
+			}
+			cIdx++
+		}
+		if i >= len(src) {
+			break
+		}
+
+		b := src[i]
+		if b == '\\' {
+			i += 2 // \{ \} \[ etc — skip the escaped character
+			continue
+		}
+		switch b {
+		case '{':
+			opens = append(opens, i)
+		case '}':
+			if len(opens) == 0 {
+				reportAt(ctx, r.ID(), "unmatched } — no corresponding {", r.DefaultSeverity(), i, i+1)
+			} else {
+				opens = opens[:len(opens)-1]
+			}
+		}
+		i++
+	}
+
+	for _, off := range opens {
+		reportAt(ctx, r.ID(), "unmatched { — no corresponding }", r.DefaultSeverity(), off, off+1)
+	}
+}
+
+// --- rule: tex/uncited-label ---
+
+type texUncitedLabel struct{}
+
+var labelRe = regexp.MustCompile(`\\label\{([^}]+)\}`)
+var citingRefRe = regexp.MustCompile(`\\(?:ref|cref|Cref|eqref|autoref|pageref|vref|nameref)[*]?\{([^}]+)\}`)
+
+func (texUncitedLabel) ID() string { return "tex/uncited-label" }
+func (texUncitedLabel) Description() string {
+	return "\\label defined but never referenced in the document"
+}
+func (texUncitedLabel) DefaultSeverity() core.Severity { return core.Warning }
+
+func (r texUncitedLabel) Check(ctx *core.RunContext) {
+	src := ctx.File.Bytes
+
+	// Collect all reference targets first.
+	cited := make(map[string]bool)
+	for _, m := range citingRefRe.FindAllSubmatchIndex(src, -1) {
+		if inComment(m[0], ctx.CommentRanges) {
+			continue
+		}
+		// \cref{fig:a,fig:b} — split comma-separated lists.
+		for key := range strings.SplitSeq(string(src[m[2]:m[3]]), ",") {
+			cited[strings.TrimSpace(key)] = true
+		}
+	}
+
+	// Report labels in fig:/tab:/eq: namespaces that are never referenced.
+	for _, m := range labelRe.FindAllSubmatchIndex(src, -1) {
+		if inComment(m[0], ctx.CommentRanges) {
+			continue
+		}
+		name := string(src[m[2]:m[3]])
+		if !strings.HasPrefix(name, "fig:") && !strings.HasPrefix(name, "tab:") && !strings.HasPrefix(name, "eq:") {
+			continue
+		}
+		if !cited[name] {
+			reportAt(ctx, r.ID(),
+				fmt.Sprintf(`\label{%s} is never referenced; add \ref{%s} or \cref{%s} in the text`, name, name, name),
+				r.DefaultSeverity(), m[0], m[1])
+		}
+	}
 }

@@ -1,7 +1,10 @@
-// Package config loads and merges eastwood.toml configuration files.
-package config
+// Config loading: discovers and merges eastwood.toml files.
+
+package runner
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,16 +14,12 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// File is the decoded representation of a single eastwood.toml.
+// File is the decoded representation of a single eastwood.toml. Every
+// top-level section other than [linter] is treated as a language section, so
+// adding a language to the linter requires no config changes.
 type File struct {
-	Linter     linterSection   `toml:"linter"`
-	Python     languageSection `toml:"python"`
-	Latex      languageSection `toml:"latex"`
-	Go         languageSection `toml:"go"`
-	Rust       languageSection `toml:"rust"`
-	Javascript languageSection `toml:"javascript"`
-	Typescript languageSection `toml:"typescript"`
-	Svelte     languageSection `toml:"svelte"`
+	Linter linterSection
+	Langs  map[string]languageSection
 }
 
 type linterSection struct {
@@ -35,14 +34,12 @@ type languageSection struct {
 
 // Config is the resolved, merged configuration used at runtime.
 type Config struct {
-	FailOn     core.Severity
-	Python     ResolvedLang
-	Latex      ResolvedLang
-	Go         ResolvedLang
-	Rust       ResolvedLang
-	Javascript ResolvedLang
-	Typescript ResolvedLang
-	Svelte     ResolvedLang
+	FailOn core.Severity
+	Langs  map[string]ResolvedLang
+
+	// Fingerprint identifies the exact config chain contents, so caches can
+	// be invalidated when any eastwood.toml in the chain changes.
+	Fingerprint string
 }
 
 type ResolvedLang struct {
@@ -51,27 +48,33 @@ type ResolvedLang struct {
 	Rules   map[string]core.RuleConfig
 }
 
-// Chain discovers and loads all eastwood.toml files from startDir up to the
+// LoadConfig discovers and loads all eastwood.toml files from startDir up to the
 // filesystem root, merges them outermost-first (child overrides parent).
-// Returns an error if no config file is found anywhere.
-func Chain(startDir string) (*Config, error) {
+func LoadConfig(startDir string) (*Config, error) {
 	paths, err := findChain(startDir)
 	if err != nil {
 		return nil, err
 	}
-	if len(paths) == 0 {
-		return merge(nil), nil
-	}
 
+	h := sha256.New()
 	var files []File
 	for _, p := range paths {
-		f, err := loadFile(p)
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			return nil, fmt.Errorf("loading %s: %w", p, err)
+		}
+		fmt.Fprintf(h, "%s\x00%d\x00", p, len(raw))
+		h.Write(raw)
+		f, err := parseFile(raw)
 		if err != nil {
 			return nil, fmt.Errorf("loading %s: %w", p, err)
 		}
 		files = append(files, f)
 	}
-	return merge(files), nil
+
+	cfg := merge(files)
+	cfg.Fingerprint = hex.EncodeToString(h.Sum(nil))
+	return cfg, nil
 }
 
 func findChain(dir string) ([]string, error) {
@@ -95,24 +98,33 @@ func findChain(dir string) ([]string, error) {
 	return found, nil
 }
 
-func loadFile(path string) (File, error) {
-	var f File
-	if _, err := toml.DecodeFile(path, &f); err != nil {
+func parseFile(raw []byte) (File, error) {
+	var sections map[string]toml.Primitive
+	md, err := toml.Decode(string(raw), &sections)
+	if err != nil {
 		return File{}, err
+	}
+	f := File{Langs: make(map[string]languageSection)}
+	for name, prim := range sections {
+		if name == "linter" {
+			if err := md.PrimitiveDecode(prim, &f.Linter); err != nil {
+				return File{}, fmt.Errorf("[linter]: %w", err)
+			}
+			continue
+		}
+		var sec languageSection
+		if err := md.PrimitiveDecode(prim, &sec); err != nil {
+			return File{}, fmt.Errorf("[%s]: %w", name, err)
+		}
+		f.Langs[name] = sec
 	}
 	return f, nil
 }
 
 func merge(files []File) *Config {
 	cfg := &Config{
-		FailOn:     core.Warning,
-		Python:     ResolvedLang{Rules: make(map[string]core.RuleConfig)},
-		Latex:      ResolvedLang{Rules: make(map[string]core.RuleConfig)},
-		Go:         ResolvedLang{Rules: make(map[string]core.RuleConfig)},
-		Rust:       ResolvedLang{Rules: make(map[string]core.RuleConfig)},
-		Javascript: ResolvedLang{Rules: make(map[string]core.RuleConfig)},
-		Typescript: ResolvedLang{Rules: make(map[string]core.RuleConfig)},
-		Svelte:     ResolvedLang{Rules: make(map[string]core.RuleConfig)},
+		FailOn: core.Warning,
+		Langs:  make(map[string]ResolvedLang),
 	}
 	for _, f := range files {
 		if f.Linter.FailOn != "" {
@@ -120,13 +132,14 @@ func merge(files []File) *Config {
 				cfg.FailOn = sv
 			}
 		}
-		applyLang(&cfg.Python, f.Python)
-		applyLang(&cfg.Latex, f.Latex)
-		applyLang(&cfg.Go, f.Go)
-		applyLang(&cfg.Rust, f.Rust)
-		applyLang(&cfg.Javascript, f.Javascript)
-		applyLang(&cfg.Typescript, f.Typescript)
-		applyLang(&cfg.Svelte, f.Svelte)
+		for name, sec := range f.Langs {
+			dst := cfg.Langs[name]
+			if dst.Rules == nil {
+				dst.Rules = make(map[string]core.RuleConfig)
+			}
+			applyLang(&dst, sec)
+			cfg.Langs[name] = dst
+		}
 	}
 	return cfg
 }
@@ -145,24 +158,10 @@ func applyLang(dst *ResolvedLang, src languageSection) {
 
 // LangConfig returns the ResolvedLang for the given language name.
 func (c *Config) LangConfig(lang string) ResolvedLang {
-	switch lang {
-	case "python":
-		return c.Python
-	case "latex":
-		return c.Latex
-	case "go":
-		return c.Go
-	case "rust":
-		return c.Rust
-	case "javascript":
-		return c.Javascript
-	case "typescript":
-		return c.Typescript
-	case "svelte":
-		return c.Svelte
-	default:
-		return ResolvedLang{Rules: make(map[string]core.RuleConfig)}
+	if rl, ok := c.Langs[lang]; ok {
+		return rl
 	}
+	return ResolvedLang{Rules: make(map[string]core.RuleConfig)}
 }
 
 // IsEnabled reports whether ruleID is enabled according to this lang config.

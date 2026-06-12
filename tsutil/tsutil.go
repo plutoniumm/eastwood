@@ -4,6 +4,8 @@ package tsutil
 import (
 	"context"
 	"iter"
+	"slices"
+	"strings"
 	"sync"
 	"unicode/utf8"
 	"unsafe"
@@ -53,9 +55,10 @@ type queryCacheKey struct {
 var compiledQueries sync.Map
 
 // CompiledQuery is a precompiled, reusable tree-sitter query.
-// Create at package initialisation with MustQuery; call Run per file.
+// Create at package initialisation with MustQuery; call Run or Matches per file.
 type CompiledQuery struct {
-	q *sitter.Query
+	q     *sitter.Query
+	names []string // capture index → name, precomputed (CaptureNameForId is a cgo call)
 }
 
 // MustQuery compiles queryStr against lang and returns a CompiledQuery.
@@ -65,17 +68,24 @@ type CompiledQuery struct {
 func MustQuery(queryStr string, lang *sitter.Language) CompiledQuery {
 	key := queryCacheKey{lang: uintptr(unsafe.Pointer(lang)), q: queryStr}
 	if v, ok := compiledQueries.Load(key); ok {
-		return CompiledQuery{q: v.(*sitter.Query)}
+		return v.(CompiledQuery)
 	}
 	q, err := sitter.NewQuery([]byte(queryStr), lang)
 	if err != nil {
 		panic("tsutil.MustQuery: invalid query: " + err.Error() + "\n" + queryStr)
 	}
-	compiledQueries.Store(key, q)
-	return CompiledQuery{q: q}
+	names := make([]string, q.CaptureCount())
+	for i := range names {
+		names[i] = q.CaptureNameForId(uint32(i))
+	}
+	cq := CompiledQuery{q: q, names: names}
+	compiledQueries.Store(key, cq)
+	return cq
 }
 
-// Run executes the query against tree and yields each capture.
+// Run executes the query against tree and yields each capture, flattened
+// across matches. For queries with multiple captures whose correlation
+// matters, use Matches instead.
 func (cq CompiledQuery) Run(tree *sitter.Tree, src []byte) iter.Seq[Capture] {
 	return func(yield func(Capture) bool) {
 		cursor := sitter.NewQueryCursor()
@@ -86,10 +96,44 @@ func (cq CompiledQuery) Run(tree *sitter.Tree, src []byte) iter.Seq[Capture] {
 				return
 			}
 			for _, c := range m.Captures {
-				name := cq.q.CaptureNameForId(c.Index)
-				if !yield(Capture{Node: c.Node, Name: name}) {
+				if !yield(Capture{Node: c.Node, Name: cq.names[c.Index]}) {
 					return
 				}
+			}
+		}
+	}
+}
+
+// Match is one query match with its captures still correlated.
+type Match struct {
+	names []string
+	caps  []sitter.QueryCapture
+}
+
+// Node returns the capture with the given name, or nil if the match has none.
+func (m Match) Node(name string) *sitter.Node {
+	for _, c := range m.caps {
+		if m.names[c.Index] == name {
+			return c.Node
+		}
+	}
+	return nil
+}
+
+// Matches executes the query against tree and yields one Match per query
+// match, so multi-capture queries keep their captures correlated (Run
+// flattens them, which loses which @a belongs to which @b).
+func (cq CompiledQuery) Matches(tree *sitter.Tree, src []byte) iter.Seq[Match] {
+	return func(yield func(Match) bool) {
+		cursor := sitter.NewQueryCursor()
+		cursor.Exec(cq.q, tree.RootNode())
+		for {
+			m, ok := cursor.NextMatch()
+			if !ok {
+				return
+			}
+			if !yield(Match{names: cq.names, caps: m.Captures}) {
+				return
 			}
 		}
 	}
@@ -102,6 +146,22 @@ func Query(tree *sitter.Tree, src []byte, queryStr string, lang *sitter.Language
 }
 
 // ── Position / range helpers ──────────────────────────────────────────────────
+
+// ReportNode emits a diagnostic for rule r spanning node, at the rule's
+// default severity. This is the standard one-liner for AST rules.
+func ReportNode(ctx *core.RunContext, r core.Rule, node *sitter.Node, msg string) {
+	ReportNodeSev(ctx, r, r.DefaultSeverity(), node, msg)
+}
+
+// ReportNodeSev is ReportNode with an explicit severity.
+func ReportNodeSev(ctx *core.RunContext, r core.Rule, sev core.Severity, node *sitter.Node, msg string) {
+	ctx.Report(core.Diagnostic{
+		RuleID:   r.ID(),
+		Severity: sev,
+		Message:  msg,
+		Range:    NodeRange(node, ctx.File.Bytes, ctx.File.Path),
+	})
+}
 
 // NodeRange converts a tree-sitter node's span into a core.Range.
 func NodeRange(node *sitter.Node, src []byte, filePath string) core.Range {
@@ -125,19 +185,35 @@ func pointToPos(p sitter.Point, byteOffset uint32, src []byte, filePath string) 
 	}
 }
 
+// ── Node helpers ──────────────────────────────────────────────────────────────
+
+// NodeText returns the source text covered by node.
+func NodeText(node *sitter.Node, src []byte) string {
+	return string(src[node.StartByte():node.EndByte()])
+}
+
+// HasAncestor reports whether any ancestor of node has one of the given types.
+func HasAncestor(node *sitter.Node, types ...string) bool {
+	for cur := node.Parent(); cur != nil; cur = cur.Parent() {
+		if slices.Contains(types, cur.Type()) {
+			return true
+		}
+	}
+	return false
+}
+
 // ── Comment helpers ───────────────────────────────────────────────────────────
 
-// CommentRangesFromTree extracts byte ranges of all comment nodes from the tree.
+// CommentRangesFromTree extracts byte ranges of all comment nodes from the
+// tree in a single walk.
 func CommentRangesFromTree(tree *sitter.Tree, commentNodeTypes ...string) []core.ByteRange {
 	var ranges []core.ByteRange
-	for _, t := range commentNodeTypes {
-		collectComments(tree.RootNode(), t, &ranges)
-	}
+	collectComments(tree.RootNode(), commentNodeTypes, &ranges)
 	return ranges
 }
 
-func collectComments(node *sitter.Node, typeName string, out *[]core.ByteRange) {
-	if node.Type() == typeName {
+func collectComments(node *sitter.Node, types []string, out *[]core.ByteRange) {
+	if slices.Contains(types, node.Type()) {
 		*out = append(*out, core.ByteRange{
 			Start: int(node.StartByte()),
 			End:   int(node.EndByte()),
@@ -145,7 +221,7 @@ func collectComments(node *sitter.Node, typeName string, out *[]core.ByteRange) 
 		return
 	}
 	for i := 0; i < int(node.ChildCount()); i++ {
-		collectComments(node.Child(i), typeName, out)
+		collectComments(node.Child(i), types, out)
 	}
 }
 
@@ -168,4 +244,28 @@ func WalkNodes(node *sitter.Node, fn func(*sitter.Node) bool) {
 	for i := 0; i < int(node.ChildCount()); i++ {
 		WalkNodes(node.Child(i), fn)
 	}
+}
+
+// TodoCommentRule flags TODO-style markers in comments. kinds are matched in
+// order (case-insensitive, substring); msgSuffix completes the message
+// "<KIND> comment<msgSuffix>". commentTypes are the grammar's comment node
+// types (e.g. "comment", or "line_comment"+"block_comment" for Rust).
+func TodoCommentRule(id string, lang *sitter.Language, kinds []string, msgSuffix string, commentTypes ...string) core.Rule {
+	queryStr := "(" + commentTypes[0] + ") @c"
+	if len(commentTypes) > 1 {
+		queryStr = "[(" + strings.Join(commentTypes, ") (") + ")] @c"
+	}
+	q := MustQuery(queryStr, lang)
+	return core.NewRule(id, "TODO/FIXME/HACK comment left in code", core.Info,
+		func(r core.Rule, ctx *core.RunContext) {
+			for cap := range q.Run(ctx.Tree, ctx.File.Bytes) {
+				text := strings.ToUpper(NodeText(cap.Node, ctx.File.Bytes))
+				for _, kind := range kinds {
+					if strings.Contains(text, kind) {
+						ReportNode(ctx, r, cap.Node, kind+" comment"+msgSuffix)
+						break
+					}
+				}
+			}
+		})
 }

@@ -1,7 +1,8 @@
-// Package cache provides a SHA256-keyed disk cache for linter results.
-// On startup, if the set of active rules has changed since the last run, the
-// entire results directory is wiped so stale diagnostics are never served.
-package cache
+// Disk result cache: SHA256-keyed per-file diagnostics. On startup, if the
+// set of active rules has changed since the last run, the entire results
+// directory is wiped so stale diagnostics are never served.
+
+package runner
 
 import (
 	"crypto/sha256"
@@ -44,16 +45,16 @@ type wireDiagnostic struct {
 
 func toWire(d core.Diagnostic) wireDiagnostic {
 	return wireDiagnostic{
-		RuleID:  d.RuleID,
+		RuleID:   d.RuleID,
 		Severity: int(d.Severity),
-		Message: d.Message,
-		File:    d.Range.Start.File,
-		SLine:   d.Range.Start.Line,
-		SCol:    d.Range.Start.Col,
-		SOffset: d.Range.Start.Offset,
-		ELine:   d.Range.End.Line,
-		ECol:    d.Range.End.Col,
-		EOffset: d.Range.End.Offset,
+		Message:  d.Message,
+		File:     d.Range.Start.File,
+		SLine:    d.Range.Start.Line,
+		SCol:     d.Range.Start.Col,
+		SOffset:  d.Range.Start.Offset,
+		ELine:    d.Range.End.Line,
+		ECol:     d.Range.End.Col,
+		EOffset:  d.Range.End.Offset,
 	}
 }
 
@@ -69,10 +70,10 @@ func fromWire(w wireDiagnostic) core.Diagnostic {
 	}
 }
 
-// New initialises the cache. ruleIDs is the sorted list of all currently-active
+// NewCache initialises the cache. ruleIDs is the sorted list of all currently-active
 // rule IDs; if it differs from what was stored on the last run, the results
 // directory is wiped before returning.
-func New(ruleIDs []string) (*Cache, error) {
+func NewCache(ruleIDs []string) (*Cache, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
@@ -146,7 +147,7 @@ func computeRulesetHash(ruleIDs []string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// RuleIDs extracts all rule IDs from a set of analyzers for use with New.
+// RuleIDs extracts all rule IDs from a set of analyzers for use with NewCache.
 func RuleIDs(analyzers []core.Analyzer) []string {
 	var ids []string
 	for _, an := range analyzers {
