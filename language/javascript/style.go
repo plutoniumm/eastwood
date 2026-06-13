@@ -248,7 +248,7 @@ func layoutRules(l *sitter.Language) []core.Rule {
 				}
 			}),
 
-		core.NewRule("js/object-layout", "multi-key objects one key per line; single-key objects on one line", core.Warning,
+		core.NewRule("js/object-layout", "objects with 3+ keys one key per line; 1-2 keys may stay on one line", core.Warning,
 			func(r core.Rule, ctx *core.RunContext) {
 				src := ctx.File.Bytes
 				for cap := range objectQ.Run(ctx.Tree, src) {
@@ -267,6 +267,8 @@ func layoutRules(l *sitter.Language) []core.Rule {
 						if multiline(node) && !multiline(props[0]) {
 							tsutil.ReportNode(ctx, r, node, "object with a single key should be written on one line")
 						}
+					case len(props) == 2:
+						continue // two keys may stay on one line
 					default:
 						seen := map[uint32]bool{node.StartPoint().Row: true}
 						bad := false
@@ -345,6 +347,17 @@ func chainLogicalOps(n *sitter.Node, src []byte, out []*sitter.Node) []*sitter.N
 	return out
 }
 
+// chainOperands collects the operand (leaf) nodes of a &&/|| chain, not
+// descending into parentheses — a parenthesised group counts as one operand.
+func chainOperands(n *sitter.Node, src []byte, out []*sitter.Node) []*sitter.Node {
+	if !isLogicalExpr(n, src) {
+		return append(out, n)
+	}
+	out = chainOperands(n.ChildByFieldName("left"), src, out)
+	out = chainOperands(n.ChildByFieldName("right"), src, out)
+	return out
+}
+
 // ternaryChainCount counts directly nested ternaries (not crossing parens).
 func ternaryChainCount(n *sitter.Node) int {
 	if n == nil || n.Type() != "ternary_expression" {
@@ -390,13 +403,22 @@ func flowLayoutRules(l *sitter.Language) []core.Rule {
 					if len(ops) < 2 {
 						continue
 					}
-					for _, op := range ops {
-						if !startsItsLine(op, src) {
-							tsutil.ReportNode(ctx, r, cap.Node, fmt.Sprintf(
-								"boolean chain with %d conditions; put each condition on its own line starting with its && or ||",
-								len(ops)+1))
+					// Each condition must be on its own line; the operator may
+					// lead or trail. Flag only when two operands share a line.
+					seen := map[uint32]bool{}
+					crammed := false
+					for _, o := range chainOperands(cap.Node, src, nil) {
+						row := o.StartPoint().Row
+						if seen[row] {
+							crammed = true
 							break
 						}
+						seen[row] = true
+					}
+					if crammed {
+						tsutil.ReportNode(ctx, r, cap.Node, fmt.Sprintf(
+							"boolean chain with %d conditions; put each condition on its own line",
+							len(ops)+1))
 					}
 				}
 				for cap := range ternaryQ.Run(ctx.Tree, src) {

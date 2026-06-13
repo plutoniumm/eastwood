@@ -98,7 +98,11 @@ func main() {
 	// eastwood.toml in the chain invalidates cached results.
 	var c *runner.Cache
 	if !*noCache {
-		c, err = runner.NewCache(append(runner.RuleIDs(analyzers), "config:"+cfg.Fingerprint))
+		// The version is part of the key so every release invalidates the
+		// cache — rule-logic changes don't alter rule IDs or config, so without
+		// this a new build would serve stale diagnostics.
+		c, err = runner.NewCache(append(runner.RuleIDs(analyzers),
+			"config:"+cfg.Fingerprint, "version:"+version))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "eastwood: cache init: %v (continuing without cache)\n", err)
 		}

@@ -15,17 +15,6 @@ class Eastwood < Formula
     end
   end
 
-  on_linux do
-    on_arm do
-      url "https://github.com/plutoniumm/eastwood/releases/download/v#{version}/eastwood_linux_arm64.tar.gz"
-      sha256 "24248c0249942b26f6a030bcec31b61f58b1eca80828bb51dae50cc619ebd754"
-    end
-    on_intel do
-      url "https://github.com/plutoniumm/eastwood/releases/download/v#{version}/eastwood_linux_amd64.tar.gz"
-      sha256 "4afc333347bbcc8eb3b60c4904ebb3492ad85a4ff9bcbb38f1be0e0b9aed79aa"
-    end
-  end
-
   def install
     bin.install "eastwood"
   end

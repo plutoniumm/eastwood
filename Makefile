@@ -48,11 +48,10 @@ clean:
 lint-self: build
 	./$(BINARY) .
 
-## release VERSION=x.y.z: cross-compile all platforms in parallel, publish, update formula, tag+push
+## release VERSION=x.y.z: build macOS binaries in parallel, publish, update formula, tag+push
 release:
 	@if [ -z "$(VERSION)" ]; then echo "usage: make release VERSION=x.y.z"; exit 1; fi
-	@command -v zig >/dev/null 2>&1 || (echo "error: zig not found — brew install zig"; exit 1)
-	@echo "→ Building v$(VERSION) for all platforms in parallel..."
+	@echo "→ Building v$(VERSION) for macOS (arm64 + amd64) in parallel..."
 	@rm -rf $(DIST) && mkdir -p $(DIST)
 	@( \
 	  ( CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
@@ -63,23 +62,9 @@ release:
 	      go build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" \
 	      -o $(DIST)/eastwood_darwin_amd64 . \
 	      && echo "  ✓ darwin/amd64" ) & P2=$$!; \
-	  ( CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
-	      CC="zig cc -target x86_64-linux-musl" \
-	      CXX="zig c++ -target x86_64-linux-musl" \
-	      go build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" \
-	      -o $(DIST)/eastwood_linux_amd64 . \
-	      && echo "  ✓ linux/amd64" ) & P3=$$!; \
-	  ( CGO_ENABLED=1 GOOS=linux GOARCH=arm64 \
-	      CC="zig cc -target aarch64-linux-musl" \
-	      CXX="zig c++ -target aarch64-linux-musl" \
-	      go build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" \
-	      -o $(DIST)/eastwood_linux_arm64 . \
-	      && echo "  ✓ linux/arm64" ) & P4=$$!; \
 	  RC=0; \
 	  wait $$P1 || RC=1; \
 	  wait $$P2 || RC=1; \
-	  wait $$P3 || RC=1; \
-	  wait $$P4 || RC=1; \
 	  exit $$RC \
 	)
 
@@ -94,13 +79,9 @@ release:
 	@cd $(DIST) && \
 	  SHA_DARWIN_ARM64=$$(grep darwin_arm64 checksums.txt | awk '{print $$1}'); \
 	  SHA_DARWIN_AMD64=$$(grep darwin_amd64 checksums.txt | awk '{print $$1}'); \
-	  SHA_LINUX_AMD64=$$(grep  linux_amd64  checksums.txt | awk '{print $$1}'); \
-	  SHA_LINUX_ARM64=$$(grep  linux_arm64  checksums.txt | awk '{print $$1}'); \
 	  cd .. && \
 	  sed -i '' -e "/darwin_arm64\.tar\.gz/{n; s/sha256 \".*\"/sha256 \"$$SHA_DARWIN_ARM64\"/;}" Formula/eastwood.rb && \
-	  sed -i '' -e "/darwin_amd64\.tar\.gz/{n; s/sha256 \".*\"/sha256 \"$$SHA_DARWIN_AMD64\"/;}" Formula/eastwood.rb && \
-	  sed -i '' -e "/linux_amd64\.tar\.gz/{n;  s/sha256 \".*\"/sha256 \"$$SHA_LINUX_AMD64\"/;}"  Formula/eastwood.rb && \
-	  sed -i '' -e "/linux_arm64\.tar\.gz/{n;  s/sha256 \".*\"/sha256 \"$$SHA_LINUX_ARM64\"/;}"  Formula/eastwood.rb
+	  sed -i '' -e "/darwin_amd64\.tar\.gz/{n; s/sha256 \".*\"/sha256 \"$$SHA_DARWIN_AMD64\"/;}" Formula/eastwood.rb
 
 	@echo "→ Publishing to GitHub releases..."
 	gh release create "v$(VERSION)" \
