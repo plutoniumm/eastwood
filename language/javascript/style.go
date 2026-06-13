@@ -5,6 +5,7 @@ package javascript
 
 import (
 	"fmt"
+	"strings"
 
 	"eastwood/core"
 	"eastwood/tsutil"
@@ -151,6 +152,10 @@ var blockKind = map[string]string{
 
 // styleRules returns the layout rules compiled for the given grammar.
 func styleRules(l *sitter.Language) []core.Rule {
+	return append(layoutRules(l), flowLayoutRules(l)...)
+}
+
+func layoutRules(l *sitter.Language) []core.Rule {
 	var (
 		declQ   = tsutil.MustQuery(`[(lexical_declaration) (variable_declaration)] @decl`, l)
 		returnQ = tsutil.MustQuery(`(return_statement) @ret`, l)
@@ -309,6 +314,147 @@ func styleRules(l *sitter.Language) []core.Rule {
 					}
 					if missingBlankAfter(outer, src) {
 						tsutil.ReportNode(ctx, r, node, "add a blank line after this "+kind)
+					}
+				}
+			}),
+	}
+}
+
+// --- flow layout rules: js/boolean-layout, js/break-per-line, js/control-flow ---
+
+var logicalOps = map[string]bool{"&&": true, "||": true}
+
+func isLogicalExpr(n *sitter.Node, src []byte) bool {
+	if n == nil || n.Type() != "binary_expression" {
+		return false
+	}
+	op := n.ChildByFieldName("operator")
+	return op != nil && logicalOps[tsutil.NodeText(op, src)]
+}
+
+// chainLogicalOps collects the operator tokens of a &&/|| chain, descending
+// through directly nested logical operands but not into parentheses — a
+// parenthesised group is its own chain, so inline (a || b) mixing is fine.
+func chainLogicalOps(n *sitter.Node, src []byte, out []*sitter.Node) []*sitter.Node {
+	if !isLogicalExpr(n, src) {
+		return out
+	}
+	out = append(out, n.ChildByFieldName("operator"))
+	out = chainLogicalOps(n.ChildByFieldName("left"), src, out)
+	out = chainLogicalOps(n.ChildByFieldName("right"), src, out)
+	return out
+}
+
+// ternaryChainCount counts directly nested ternaries (not crossing parens).
+func ternaryChainCount(n *sitter.Node) int {
+	if n == nil || n.Type() != "ternary_expression" {
+		return 0
+	}
+	return 1 + ternaryChainCount(n.ChildByFieldName("consequence")) +
+		ternaryChainCount(n.ChildByFieldName("alternative"))
+}
+
+// startsItsLine reports whether node is the first non-whitespace on its line.
+func startsItsLine(n *sitter.Node, src []byte) bool {
+	col := int(n.StartPoint().Column)
+	start := int(n.StartByte())
+	for _, c := range src[start-col : start] {
+		if c != ' ' && c != '\t' {
+			return false
+		}
+	}
+	return true
+}
+
+var controlFlowTypes = `[(if_statement) (for_statement) (for_in_statement)
+ (while_statement) (do_statement) (switch_statement) (try_statement)] @cf`
+
+func flowLayoutRules(l *sitter.Language) []core.Rule {
+	var (
+		logicalQ = tsutil.MustQuery(`(binary_expression operator: ["&&" "||"] @op) @expr`, l)
+		ternaryQ = tsutil.MustQuery(`(ternary_expression) @t`, l)
+		jumpQ    = tsutil.MustQuery(`[(break_statement) (continue_statement)] @jump`, l)
+		cfQ      = tsutil.MustQuery(controlFlowTypes, l)
+		ifQ      = tsutil.MustQuery(`(if_statement) @if`, l)
+	)
+
+	return []core.Rule{
+		core.NewRule("js/boolean-layout", "multi-condition boolean or nested ternary not split across lines", core.Warning,
+			func(r core.Rule, ctx *core.RunContext) {
+				src := ctx.File.Bytes
+				for cap := range logicalQ.Run(ctx.Tree, src) {
+					if cap.Name != "expr" || isLogicalExpr(cap.Node.Parent(), src) {
+						continue // operator capture, or not the chain root
+					}
+					ops := chainLogicalOps(cap.Node, src, nil)
+					if len(ops) < 2 {
+						continue
+					}
+					for _, op := range ops {
+						if !startsItsLine(op, src) {
+							tsutil.ReportNode(ctx, r, cap.Node, fmt.Sprintf(
+								"boolean chain with %d conditions; put each condition on its own line starting with its && or ||",
+								len(ops)+1))
+							break
+						}
+					}
+				}
+				for cap := range ternaryQ.Run(ctx.Tree, src) {
+					if p := cap.Node.Parent(); p != nil && p.Type() == "ternary_expression" {
+						continue // only the outermost ternary of a chain
+					}
+					if ternaryChainCount(cap.Node) >= 2 &&
+						cap.Node.StartPoint().Row == cap.Node.EndPoint().Row {
+						tsutil.ReportNode(ctx, r, cap.Node,
+							"nested ternary on one line; split it with ? and : starting their own lines")
+					}
+				}
+			}),
+
+		core.NewRule("js/break-per-line", "break/continue sharing a line with other code", core.Warning,
+			func(r core.Rule, ctx *core.RunContext) {
+				src := ctx.File.Bytes
+				for cap := range jumpQ.Run(ctx.Tree, src) {
+					if !startsItsLine(cap.Node, src) {
+						kw := strings.TrimSuffix(cap.Node.Type(), "_statement")
+						tsutil.ReportNode(ctx, r, cap.Node, kw+" should be on its own line")
+					}
+				}
+			}),
+
+		core.NewRule("js/control-flow", "control flow inline with other code, or if/else without braces", core.Warning,
+			func(r core.Rule, ctx *core.RunContext) {
+				src := ctx.File.Bytes
+				for cap := range cfQ.Run(ctx.Tree, src) {
+					// else if is one construct (the if may share the else's line);
+					// a labeled statement legitimately precedes its body on the
+					// same line, including Svelte's reactive `$: if (x) {`.
+					if p := cap.Node.Parent(); p != nil &&
+						(p.Type() == "else_clause" || p.Type() == "labeled_statement") {
+						continue
+					}
+					if !startsItsLine(cap.Node, src) {
+						tsutil.ReportNode(ctx, r, cap.Node,
+							"control-flow statement should start on its own line")
+					}
+				}
+				for cap := range ifQ.Run(ctx.Tree, src) {
+					node := cap.Node
+					alt := node.ChildByFieldName("alternative")
+					inElseChain := node.Parent() != nil && node.Parent().Type() == "else_clause"
+					if alt == nil && !inElseChain {
+						continue // bare if; braces not mandated
+					}
+					if cons := node.ChildByFieldName("consequence"); cons != nil && cons.Type() != "statement_block" {
+						tsutil.ReportNode(ctx, r, cons,
+							"if/else branches require braces; wrap this branch in { }")
+					}
+					if alt != nil {
+						if body := alt.NamedChild(0); body != nil &&
+							body.Type() != "statement_block" && body.Type() != "if_statement" {
+							tsutil.ReportNode(ctx, r, body,
+								"if/else branches require braces; wrap this branch in { }")
+						}
 					}
 				}
 			}),

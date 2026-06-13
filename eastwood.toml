@@ -28,6 +28,9 @@ disable = ["js/todo-comment"]
 enable = ["js/*", "ts/*"]
 disable = ["js/todo-comment"]
 
+# Svelte has no native markup rules; component <script> blocks and template
+# expressions ({#if}, {#each}, ternaries, ...) are analysed as JS/TS, so the
+# rule IDs are js/* and ts/*, not svelte/*.
 [svelte]
-enable = ["svelte/*"]
-disable = []
+enable = ["js/*", "ts/*"]
+disable = ["js/todo-comment"]

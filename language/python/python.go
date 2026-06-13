@@ -112,6 +112,9 @@ func equalityComparisonRule(id, desc string, q tsutil.CompiledQuery, msgf func(o
 
 func (Analyzer) Rules() []core.Rule {
 	return []core.Rule{
+		tsutil.TrailingCommaRule("py/trailing-comma",
+			"multiline dict literal without trailing comma", lang, "(dictionary) @dict"),
+
 		core.NewRule("py/mutable-default-arg", "mutable default argument", core.Warning,
 			func(r core.Rule, ctx *core.RunContext) {
 				for cap := range mutableDefaultQ.Run(ctx.Tree, ctx.File.Bytes) {

@@ -80,6 +80,16 @@ var printMacros = map[string]bool{"println": true, "print": true, "eprintln": tr
 
 func (Analyzer) Rules() []core.Rule {
 	return []core.Rule{
+		tsutil.TrailingCommaRule("rs/trailing-comma",
+			"multiline struct literal without trailing comma", lang, "(field_initializer_list) @lit"),
+
+		tsutil.BlankAroundRule("rs/blank-around-items",
+			"struct/enum/trait/impl without blank lines around it", lang,
+			"[(struct_item) (enum_item) (trait_item) (impl_item)] @item",
+			map[string]bool{"source_file": true, "declaration_list": true},
+			map[string]string{"struct_item": "struct", "enum_item": "enum", "trait_item": "trait", "impl_item": "impl block"},
+			"line_comment", "block_comment", "attribute_item"),
+
 		methodRule("rs/unwrap", ".unwrap() call; propagate errors with ? instead", core.Warning,
 			"unwrap", ".unwrap() panics on Err/None; propagate with ? or handle explicitly"),
 		methodRule("rs/expect", ".expect() call; propagate errors with ? instead", core.Warning,

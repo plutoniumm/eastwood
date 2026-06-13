@@ -88,6 +88,16 @@ func selectorCallRule(id, desc string, sev core.Severity, pkg string, methods ma
 
 func (Analyzer) Rules() []core.Rule {
 	return []core.Rule{
+		tsutil.TrailingCommaRule("go/trailing-comma",
+			"multiline composite literal without trailing comma", lang, "(literal_value) @lit"),
+
+		tsutil.BlankAroundRule("go/blank-around-types",
+			"type declaration without blank lines around it", lang,
+			"(type_declaration) @t",
+			map[string]bool{"source_file": true},
+			map[string]string{"type_declaration": "type declaration"},
+			"comment"),
+
 		core.NewRule("go/empty-interface", "interface{} usage; use 'any' instead (Go 1.18+)", core.Warning,
 			func(r core.Rule, ctx *core.RunContext) {
 				for cap := range emptyIfaceQ.Run(ctx.Tree, ctx.File.Bytes) {

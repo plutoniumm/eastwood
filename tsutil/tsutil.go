@@ -269,3 +269,107 @@ func TodoCommentRule(id string, lang *sitter.Language, kinds []string, msgSuffix
 			}
 		})
 }
+
+// TrailingCommaRule flags multiline literals — objects, dicts, composite
+// literals, whatever nodeQuery selects — whose last element is not followed
+// by a trailing comma before the closing delimiter.
+func TrailingCommaRule(id, desc string, lang *sitter.Language, nodeQuery string) core.Rule {
+	q := MustQuery(nodeQuery, lang)
+	return core.NewRule(id, desc, core.Warning,
+		func(r core.Rule, ctx *core.RunContext) {
+			src := ctx.File.Bytes
+			for cap := range q.Run(ctx.Tree, src) {
+				n := cap.Node
+				if n.StartPoint().Row == n.EndPoint().Row {
+					continue
+				}
+				last := n.NamedChild(int(n.NamedChildCount()) - 1)
+				for last != nil && (last.Type() == "comment" || last.Type() == "line_comment" || last.Type() == "block_comment") {
+					last = last.PrevNamedSibling()
+				}
+				if last == nil {
+					continue
+				}
+				rest := strings.TrimSpace(string(src[last.EndByte() : n.EndByte()-1]))
+				if !strings.HasPrefix(rest, ",") {
+					ReportNode(ctx, r, last, "add a trailing comma after the last element of this multiline literal")
+				}
+			}
+		})
+}
+
+// --- blank-line layout helpers ---
+
+func countNewlines(b []byte) int {
+	n := 0
+	for _, c := range b {
+		if c == '\n' {
+			n++
+		}
+	}
+	return n
+}
+
+// attachedStart walks upward over attach-type siblings (comments, decorators,
+// attribute_item, ...) that sit directly above node with no blank line: a doc
+// comment or #[derive] belongs to its declaration, so the blank line is
+// required above the group, not inside it.
+func attachedStart(node *sitter.Node, attach []string) *sitter.Node {
+	cur := node
+	for {
+		prev := cur.PrevNamedSibling()
+		if prev == nil || !slices.Contains(attach, prev.Type()) ||
+			cur.StartPoint().Row-prev.EndPoint().Row > 1 {
+			return cur
+		}
+		cur = prev
+	}
+}
+
+// attachedEnd swallows trailing attach-type siblings on the node's last line.
+func attachedEnd(node *sitter.Node, attach []string) *sitter.Node {
+	cur := node
+	for {
+		next := cur.NextNamedSibling()
+		if next == nil || !slices.Contains(attach, next.Type()) ||
+			next.StartPoint().Row != cur.EndPoint().Row {
+			return cur
+		}
+		cur = next
+	}
+}
+
+// BlankAroundRule flags nodes selected by nodeQuery that lack a blank line
+// above or below them. containers limits the check to nodes whose parent is a
+// listed type (first/last child are exempt via sibling checks); attach lists
+// node types that group with the declaration (doc comments, decorators,
+// attributes). An export_statement wrapper is hoisted automatically.
+func BlankAroundRule(id, desc string, lang *sitter.Language, nodeQuery string,
+	containers map[string]bool, kinds map[string]string, attach ...string) core.Rule {
+	q := MustQuery(nodeQuery, lang)
+	return core.NewRule(id, desc, core.Warning,
+		func(r core.Rule, ctx *core.RunContext) {
+			src := ctx.File.Bytes
+			for cap := range q.Run(ctx.Tree, src) {
+				n := cap.Node
+				kind := kinds[n.Type()]
+				if p := n.Parent(); p != nil && p.Type() == "export_statement" {
+					n = p
+				}
+				p := n.Parent()
+				if p == nil || !containers[p.Type()] {
+					continue
+				}
+				start := attachedStart(n, attach)
+				if prev := start.PrevNamedSibling(); prev != nil &&
+					countNewlines(src[prev.EndByte():start.StartByte()]) < 2 {
+					ReportNode(ctx, r, n, "add a blank line before this "+kind)
+				}
+				end := attachedEnd(n, attach)
+				if next := end.NextNamedSibling(); next != nil &&
+					countNewlines(src[end.EndByte():next.StartByte()]) < 2 {
+					ReportNode(ctx, r, n, "add a blank line after this "+kind)
+				}
+			}
+		})
+}

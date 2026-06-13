@@ -176,6 +176,12 @@ func jsRules(l *sitter.Language) []core.Rule {
 		core.NewRule("js/template-no-expression", "template literal without any ${...} expression", core.Warning,
 			func(r core.Rule, ctx *core.RunContext) {
 				for cap := range templateQ.Run(ctx.Tree, ctx.File.Bytes) {
+					// Tagged templates (css`...`, html`...`, gql`...`) parse as
+					// call_expression with the template as direct argument; the tag
+					// is semantic, so a backtick string is required there.
+					if p := cap.Node.Parent(); p != nil && p.Type() == "call_expression" {
+						continue
+					}
 					hasExpr := false
 					for i := 0; i < int(cap.Node.NamedChildCount()); i++ {
 						if cap.Node.NamedChild(i).Type() == "template_substitution" {
@@ -191,6 +197,9 @@ func jsRules(l *sitter.Language) []core.Rule {
 
 		tsutil.TodoCommentRule("js/todo-comment", l,
 			[]string{"TODO", "FIXME", "HACK"}, "; track in your issue tracker", "comment"),
+
+		tsutil.TrailingCommaRule("js/trailing-comma",
+			"multiline object literal without trailing comma", l, "(object) @obj"),
 
 		core.NewRule("js/no-eval", "eval() call is a security risk", core.Error,
 			func(r core.Rule, ctx *core.RunContext) {
@@ -234,6 +243,13 @@ func tsOnlyRules(l *sitter.Language) []core.Rule {
 	)
 
 	return []core.Rule{
+		tsutil.BlankAroundRule("ts/blank-around-types",
+			"interface/enum without blank lines around it", l,
+			"[(interface_declaration) (enum_declaration)] @t",
+			map[string]bool{"program": true, "statement_block": true},
+			map[string]string{"interface_declaration": "interface", "enum_declaration": "enum"},
+			"comment", "decorator"),
+
 		core.NewRule("ts/no-explicit-any", "explicit 'any' type annotation", core.Warning,
 			func(r core.Rule, ctx *core.RunContext) {
 				for cap := range predefinedTypeQ.Run(ctx.Tree, ctx.File.Bytes) {
